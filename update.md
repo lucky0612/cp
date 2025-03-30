@@ -1,3 +1,297 @@
+from atlassian import Confluence
+import logging
+import sys
+import os
+import json
+from html.parser import HTMLParser
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("confluence_client.log"),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+logger = logging.getLogger("ConfluenceClient")
+
+class HTMLFilter(HTMLParser):
+    """Parse HTML content and extract plain text for RAG processing."""
+    text = ""
+    def handle_data(self, data):
+        self.text += data + " "
+    
+    def get_text(self):
+        return self.text.strip()
+
+class ConfluenceClient:
+    """Client for Confluence API operations using the atlassian-python-api package."""
+    
+    def __init__(self, base_url, username, api_token):
+        """
+        Initialize the Confluence client with authentication details.
+        
+        Args:
+            base_url: The base URL of the Confluence instance (e.g., https://cmegroup.atlassian.net/wiki)
+            username: The username for authentication
+            api_token: The API token for authentication
+        """
+        self.base_url = base_url
+        self.username = username
+        self.api_token = api_token
+        
+        # Initialize the Confluence client
+        logger.info(f"Initializing Confluence client for {base_url}")
+        self.client = Confluence(
+            url=base_url,
+            username=username,
+            password=api_token,
+            verify_ssl=False,
+            cloud=True  # Explicitly set for Confluence Cloud
+        )
+    
+    def test_connection(self):
+        """Test the connection to Confluence API."""
+        try:
+            logger.info("Testing connection to Confluence...")
+            # Simple API call to test connection
+            server_info = self.client.get_all_spaces(start=0, limit=1)
+            logger.info("Connection successful!")
+            return True
+        except Exception as e:
+            logger.error(f"Connection test failed: {str(e)}")
+            return False
+    
+    def get_all_spaces(self):
+        """Get all spaces the user has access to."""
+        try:
+            logger.info("Retrieving all spaces...")
+            spaces = self.client.get_all_spaces()
+            logger.info(f"Successfully retrieved {len(spaces)} spaces")
+            return spaces
+        except Exception as e:
+            logger.error(f"Failed to retrieve spaces: {str(e)}")
+            return []
+    
+    def get_space_info(self, space_key):
+        """Get information about a specific space."""
+        try:
+            logger.info(f"Retrieving information for space {space_key}...")
+            space = self.client.get_space(space_key)
+            logger.info(f"Successfully retrieved space information for {space_key}")
+            return space
+        except Exception as e:
+            logger.error(f"Failed to retrieve space information for {space_key}: {str(e)}")
+            return None
+    
+    def get_pages_in_space(self, space_key=None, limit=100):
+        """
+        Get all pages in a specific space or all spaces if space_key is None.
+        
+        Args:
+            space_key: The key of the space to get pages from (None for all spaces)
+            limit: Maximum number of pages to retrieve
+        """
+        try:
+            logger.info(f"Retrieving pages from space {space_key or 'all spaces'}...")
+            if space_key:
+                pages = self.client.get_all_pages_from_space(space_key, limit=limit)
+            else:
+                # Get pages from all spaces
+                pages = []
+                spaces = self.get_all_spaces()
+                for space in spaces:
+                    space_key = space.get('key')
+                    try:
+                        space_pages = self.client.get_all_pages_from_space(space_key, limit=limit)
+                        pages.extend(space_pages)
+                        logger.info(f"Retrieved {len(space_pages)} pages from space {space_key}")
+                    except Exception as e:
+                        logger.error(f"Error retrieving pages from space {space_key}: {str(e)}")
+            
+            logger.info(f"Successfully retrieved {len(pages)} pages total")
+            return pages
+        except Exception as e:
+            logger.error(f"Failed to retrieve pages: {str(e)}")
+            return []
+    
+    def search_content(self, cql, limit=100):
+        """
+        Search for content using CQL (Confluence Query Language).
+        
+        Args:
+            cql: The CQL query string
+            limit: Maximum number of results to return
+        """
+        try:
+            logger.info(f"Searching for content with CQL: {cql}")
+            results = self.client.cql(cql, limit=limit)
+            result_count = len(results.get('results', []))
+            logger.info(f"Search returned {result_count} results")
+            return results
+        except Exception as e:
+            logger.error(f"Search failed: {str(e)}")
+            return {"results": []}
+    
+    def get_page_by_id(self, page_id, expand=None):
+        """
+        Get a specific page by its ID.
+        
+        Args:
+            page_id: The ID of the page
+            expand: Optional list of properties to expand
+        """
+        try:
+            logger.info(f"Retrieving page with ID {page_id}")
+            expand_str = ",".join(expand) if expand else "body.storage"
+            page = self.client.get_page_by_id(page_id, expand=expand_str)
+            logger.info(f"Successfully retrieved page: {page.get('title', 'Unknown')}")
+            return page
+        except Exception as e:
+            logger.error(f"Failed to retrieve page with ID {page_id}: {str(e)}")
+            return None
+    
+    def get_page_content(self, page_id):
+        """
+        Get the content of a page in a format suitable for RAG.
+        
+        Args:
+            page_id: The ID of the page
+        """
+        try:
+            logger.info(f"Retrieving content for page with ID {page_id}")
+            page = self.get_page_by_id(page_id, expand=["body.storage", "version"])
+            if not page:
+                return None
+            
+            # Extract metadata
+            metadata = {
+                "id": page.get("id"),
+                "title": page.get("title"),
+                "type": page.get("type"),
+                "version": page.get("version", {}).get("number"),
+                "url": f"{self.base_url}/pages/viewpage.action?pageId={page.get('id')}"
+            }
+            
+            # Extract content
+            body = page.get("body", {}).get("storage", {}).get("value", "")
+            
+            # Parse HTML to get plain text
+            html_filter = HTMLFilter()
+            html_filter.feed(body)
+            plain_text = html_filter.get_text()
+            
+            return {
+                "metadata": metadata,
+                "content": plain_text,
+                "raw_html": body
+            }
+        except Exception as e:
+            logger.error(f"Failed to process page content for {page_id}: {str(e)}")
+            return None
+    
+    def get_all_content_for_rag(self, space_key=None, limit_per_space=100):
+        """
+        Get all content from Confluence in a format suitable for RAG.
+        
+        Args:
+            space_key: Optional space key to limit the retrieval
+            limit_per_space: Maximum number of pages to retrieve per space
+        """
+        try:
+            logger.info(f"Retrieving all content for RAG from {space_key or 'all spaces'}")
+            all_pages = self.get_pages_in_space(space_key, limit=limit_per_space)
+            
+            processed_content = []
+            for page in all_pages:
+                try:
+                    page_content = self.get_page_content(page.get('id'))
+                    if page_content:
+                        processed_content.append({
+                            "id": page.get('id'),
+                            "title": page.get('title'),
+                            "space_key": page.get('space', {}).get('key'),
+                            "url": page_content.get('metadata', {}).get('url'),
+                            "content": page_content.get('content'),
+                            "metadata": page_content.get('metadata')
+                        })
+                except Exception as e:
+                    logger.error(f"Error processing page {page.get('id')}: {str(e)}")
+            
+            logger.info(f"Successfully retrieved and processed {len(processed_content)} pages for RAG")
+            return processed_content
+        except Exception as e:
+            logger.error(f"Failed to retrieve content for RAG: {str(e)}")
+            return []
+
+# Script execution
+if __name__ == "__main__":
+    # Use environment variables or command line arguments for better security
+    confluence_url = os.environ.get("CONFLUENCE_URL", "https://cmegroup.atlassian.net/wiki")
+    username = os.environ.get("CONFLUENCE_USERNAME", "cli_api_user")
+    api_token = os.environ.get("CONFLUENCE_API_TOKEN", "your-api-token-here")
+    
+    # Create the client
+    client = ConfluenceClient(confluence_url, username, api_token)
+    
+    # Test the connection
+    if client.test_connection():
+        print("\n✅ Connection to Confluence successful!")
+    else:
+        print("\n❌ Failed to connect to Confluence. Check log for details.")
+        sys.exit(1)
+    
+    # Get all spaces
+    spaces = client.get_all_spaces()
+    if spaces:
+        print(f"\n✅ Successfully retrieved {len(spaces)} spaces")
+        if len(spaces) > 0:
+            print("Sample spaces:")
+            for space in spaces[:3]:  # Show top 3
+                print(f"  - {space.get('name')} (Key: {space.get('key')})")
+    else:
+        print("\n❌ Failed to retrieve spaces or no spaces available")
+    
+    # Search for content
+    search_results = client.search_content("type=page AND title~Test")
+    results = search_results.get("results", [])
+    if results:
+        print(f"\n✅ Search returned {len(results)} results")
+        for page in results[:3]:  # Show top 3
+            print(f"  - {page.get('title')} (ID: {page.get('id')})")
+    else:
+        print("\n❌ Search returned no results")
+    
+    # Get pages from all spaces (limited to conserve resources)
+    print("\nRetrieving sample pages from spaces...")
+    for space in spaces[:2]:  # Only check first 2 spaces to avoid long runtime
+        space_key = space.get('key')
+        pages = client.get_pages_in_space(space_key, limit=5)  # Limit to 5 pages per space
+        print(f"Space {space_key}: Retrieved {len(pages)} pages")
+        
+        # Get content of first page as example (if available)
+        if pages:
+            first_page = pages[0]
+            page_id = first_page.get('id')
+            page_content = client.get_page_content(page_id)
+            if page_content:
+                print(f"  Sample page: {first_page.get('title')}")
+                content_preview = page_content.get('content', '')[:100].replace('\n', ' ').strip()
+                print(f"  Content preview: {content_preview}...")
+    
+    print("\nConfluence integration test completed.")
+
+
+
+
+
+
+
+
+
+
+
 import requests
 import logging
 import json
