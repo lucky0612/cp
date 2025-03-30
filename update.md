@@ -4,6 +4,550 @@ import json
 import os
 import sys
 from requests.auth import HTTPBasicAuth
+import urllib3
+from html.parser import HTMLParser
+
+# Disable SSL verification warnings
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("confluence_client.log"),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+logger = logging.getLogger("ConfluenceClient")
+
+class HTMLFilter(HTMLParser):
+    text = ""
+    def handle_data(self, data):
+        self.text += data + " "
+
+class ConfluenceClient:
+    """Client for Confluence REST API operations with comprehensive error handling."""
+    
+    def __init__(self, base_url, username, api_token):
+        """
+        Initialize the Confluence client with authentication details.
+        
+        Args:
+            base_url: The base URL of the Confluence instance (e.g., https://cmegroup.atlassian.net)
+            username: The username for authentication
+            api_token: The API token for authentication
+        """
+        self.base_url = base_url.rstrip('/')
+        self.auth = HTTPBasicAuth(username, api_token)
+        self.api_url = f"{self.base_url}/wiki/rest/api"
+        self.headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "User-Agent": "ConfluenceClient/1.0 Python/Requests"
+        }
+        logger.info(f"Initialized Confluence client for {self.base_url}")
+        
+    def test_connection(self):
+        """Test the connection to Confluence API."""
+        try:
+            logger.info("Testing connection to Confluence...")
+            response = requests.get(
+                f"{self.api_url}/content",
+                auth=self.auth,
+                headers=self.headers,
+                params={"limit": 1},
+                verify=False
+            )
+            response.raise_for_status()
+            
+            # Print raw response for debugging
+            raw_content = response.text
+            logger.info(f"Raw response content (test connection): {raw_content[:500]}...")
+            
+            # Handle empty response
+            if not raw_content.strip():
+                logger.warning("Empty response received during connection test")
+                return True  # Still consider it a success if status code is OK
+            
+            try:
+                response.json()
+                logger.info("Connection successful!")
+                return True
+            except json.JSONDecodeError as e:
+                logger.error(f"Connection succeeded but received invalid JSON: {str(e)}")
+                logger.error(f"Response content: {raw_content}")
+                return False
+                
+        except requests.RequestException as e:
+            logger.error(f"Connection test failed: {str(e)}")
+            if hasattr(e, 'response') and e.response is not None:
+                logger.error(f"Status code: {e.response.status_code}")
+                try:
+                    error_details = e.response.json()
+                    logger.error(f"Error details: {json.dumps(error_details, indent=2)}")
+                except:
+                    logger.error(f"Response content: {e.response.text}")
+            return False
+    
+    def get_content_by_id(self, content_id, expand=None):
+        """
+        Get content by ID with optional expansion parameters.
+        
+        Args:
+            content_id: The ID of the content to retrieve
+            expand: Comma-separated list of properties to expand (e.g., "body.storage,version,space")
+        """
+        try:
+            params = {}
+            if expand:
+                params["expand"] = expand
+                
+            logger.info(f"Fetching content with ID: {content_id}, expand: {expand}")
+            response = requests.get(
+                f"{self.api_url}/content/{content_id}",
+                auth=self.auth,
+                headers=self.headers,
+                params=params,
+                verify=False
+            )
+            response.raise_for_status()
+            
+            # Print raw response for debugging
+            raw_content = response.text
+            logger.info(f"Raw response content (content by ID): {raw_content[:500]}...")
+            
+            # Handle empty response
+            if not raw_content.strip():
+                logger.warning(f"Empty response received for content ID: {content_id}")
+                return None
+            
+            try:
+                content = response.json()
+                logger.info(f"Successfully retrieved content: {content.get('title', 'Unknown title')}")
+                return content
+            except json.JSONDecodeError as e:
+                logger.error(f"Failed to parse JSON for content ID {content_id}: {str(e)}")
+                logger.error(f"Response content: {raw_content}")
+                return None
+                
+        except requests.RequestException as e:
+            logger.error(f"Failed to get content by ID: {str(e)}")
+            if hasattr(e, 'response') and e.response is not None:
+                logger.error(f"Status code: {e.response.status_code}")
+                try:
+                    error_details = e.response.json()
+                    logger.error(f"Error details: {json.dumps(error_details, indent=2)}")
+                except:
+                    logger.error(f"Response content: {e.response.text}")
+            return None
+            
+    def search_content(self, cql=None, title=None, content_type="page", 
+                      expand=None, limit=10, start=0):
+        """
+        Search for content using CQL or specific parameters.
+        
+        Args:
+            cql: Confluence Query Language string
+            title: Title to search for
+            content_type: Type of content to search for (default: page)
+            expand: Properties to expand in results
+            limit: Maximum number of results to return
+            start: Starting index for pagination
+        """
+        params = {
+            "limit": limit,
+            "start": start
+        }
+        
+        if cql:
+            params["cql"] = cql
+        else:
+            # Build CQL if not provided
+            query_parts = []
+            
+            if content_type:
+                query_parts.append(f"type={content_type}")
+                
+            if title:
+                # Escape special characters in title
+                safe_title = title.replace('"', '\\"')
+                query_parts.append(f'title~"{safe_title}"')
+                
+            if query_parts:
+                params["cql"] = " AND ".join(query_parts)
+        
+        if expand:
+            params["expand"] = expand
+            
+        try:
+            logger.info(f"Searching for content with params: {params}")
+            response = requests.get(
+                f"{self.api_url}/content/search",
+                auth=self.auth,
+                headers=self.headers,
+                params=params,
+                verify=False
+            )
+            response.raise_for_status()
+            
+            # Print raw response for debugging
+            raw_content = response.text
+            logger.info(f"Raw response content (search): {raw_content[:500]}...")
+            
+            # Handle empty response
+            if not raw_content.strip():
+                logger.warning("Empty response received for search query")
+                return {"results": []}
+            
+            try:
+                results = response.json()
+                logger.info(f"Search returned {len(results.get('results', []))} results")
+                return results
+            except json.JSONDecodeError as e:
+                logger.error(f"Failed to parse JSON for search: {str(e)}")
+                logger.error(f"Response content: {raw_content}")
+                return {"results": []}
+                
+        except requests.RequestException as e:
+            logger.error(f"Failed to search content: {str(e)}")
+            if hasattr(e, 'response') and e.response is not None:
+                logger.error(f"Status code: {e.response.status_code}")
+                try:
+                    error_details = e.response.json()
+                    logger.error(f"Error details: {json.dumps(error_details, indent=2)}")
+                except:
+                    logger.error(f"Response content: {e.response.text}")
+            return {"results": []}
+    
+    def get_page_content(self, page_id):
+        """
+        Get the content of a page in a suitable format for RAG.
+        This extracts and processes the content to be more suitable for embeddings.
+        
+        Args:
+            page_id: The ID of the page
+        """
+        try:
+            page = self.get_content_by_id(page_id, expand="body.storage,metadata.labels")
+            if not page:
+                return None
+                
+            # Extract basic metadata
+            metadata = {
+                "id": page.get("id"),
+                "title": page.get("title"),
+                "type": page.get("type"),
+                "url": f"{self.base_url}/wiki/pages/viewpage.action?pageId={page.get('id')}",
+                "labels": [label.get("name") for label in page.get("metadata", {}).get("labels", {}).get("results", [])]
+            }
+            
+            # Get raw content
+            content = page.get("body", {}).get("storage", {}).get("value", "")
+            
+            # Process the HTML content
+            html_filter = HTMLFilter()
+            html_filter.feed(content)
+            plain_text = html_filter.text
+            
+            return {
+                "metadata": metadata,
+                "content": plain_text,
+                "raw_html": content
+            }
+        except Exception as e:
+            logger.error(f"Error processing page content: {str(e)}")
+            return None
+
+    def get_all_content(self, content_type="page", limit=100, expand=None):
+        """
+        Retrieve all content of specified type with pagination handling.
+        
+        Args:
+            content_type: Type of content to retrieve (default: page)
+            limit: Maximum number of results per request
+            expand: Properties to expand in results
+        """
+        all_content = []
+        start = 0
+        
+        logger.info(f"Retrieving all {content_type} content")
+        
+        while True:
+            try:
+                params = {
+                    "type": content_type,
+                    "limit": limit,
+                    "start": start
+                }
+                
+                if expand:
+                    params["expand"] = expand
+                
+                response = requests.get(
+                    f"{self.api_url}/content",
+                    auth=self.auth,
+                    headers=self.headers,
+                    params=params,
+                    verify=False
+                )
+                response.raise_for_status()
+                
+                # Print raw response for debugging
+                raw_content = response.text
+                logger.info(f"Raw response content (all content): {raw_content[:500]}...")
+                
+                # Handle empty response
+                if not raw_content.strip():
+                    logger.warning(f"Empty response received when retrieving all {content_type} content")
+                    break
+                
+                try:
+                    data = response.json()
+                except json.JSONDecodeError as e:
+                    logger.error(f"Failed to parse JSON when retrieving content: {str(e)}")
+                    logger.error(f"Response content: {raw_content}")
+                    break
+                
+                results = data.get("results", [])
+                if not results:
+                    break
+                    
+                all_content.extend(results)
+                logger.info(f"Retrieved {len(results)} {content_type}s (total: {len(all_content)})")
+                
+                # Check if there are more pages
+                if len(results) < limit:
+                    break
+                    
+                start += limit
+            except requests.RequestException as e:
+                logger.error(f"Error retrieving content: {str(e)}")
+                if hasattr(e, 'response') and e.response is not None:
+                    logger.error(f"Status code: {e.response.status_code}")
+                    try:
+                        error_details = e.response.json()
+                        logger.error(f"Error details: {json.dumps(error_details, indent=2)}")
+                    except:
+                        logger.error(f"Response content: {e.response.text}")
+                break
+                
+        logger.info(f"Retrieved a total of {len(all_content)} {content_type}s")
+        return all_content
+    
+    def get_spaces(self, limit=25, start=0):
+        """
+        Get all spaces the user has access to.
+        
+        Args:
+            limit: Maximum number of results per request
+            start: Starting index for pagination
+        """
+        try:
+            params = {
+                "limit": limit,
+                "start": start
+            }
+            
+            logger.info("Fetching spaces...")
+            response = requests.get(
+                f"{self.api_url}/space",
+                auth=self.auth,
+                headers=self.headers,
+                params=params,
+                verify=False
+            )
+            response.raise_for_status()
+            
+            # Print raw response for debugging
+            raw_content = response.text
+            logger.info(f"Raw response content (spaces): {raw_content[:500]}...")
+            
+            # Handle empty response
+            if not raw_content.strip():
+                logger.warning("Empty response received when fetching spaces")
+                return {"results": []}
+            
+            try:
+                spaces = response.json()
+                logger.info(f"Successfully retrieved {len(spaces.get('results', []))} spaces")
+                return spaces
+            except json.JSONDecodeError as e:
+                logger.error(f"Failed to parse JSON for spaces: {str(e)}")
+                logger.error(f"Response content: {raw_content}")
+                return {"results": []}
+                
+        except requests.RequestException as e:
+            logger.error(f"Failed to get spaces: {str(e)}")
+            if hasattr(e, 'response') and e.response is not None:
+                logger.error(f"Status code: {e.response.status_code}")
+                try:
+                    error_details = e.response.json()
+                    logger.error(f"Error details: {json.dumps(error_details, indent=2)}")
+                except:
+                    logger.error(f"Response content: {e.response.text}")
+            return {"results": []}
+    
+    def get_all_spaces(self):
+        """
+        Retrieve all spaces with pagination handling.
+        """
+        all_spaces = []
+        start = 0
+        limit = 25  # Confluence API commonly uses 25 as default
+        
+        logger.info("Retrieving all spaces")
+        
+        while True:
+            spaces = self.get_spaces(limit=limit, start=start)
+            if not spaces:
+                break
+                
+            results = spaces.get("results", [])
+            if not results:
+                break
+                
+            all_spaces.extend(results)
+            logger.info(f"Retrieved {len(results)} spaces (total: {len(all_spaces)})")
+            
+            # Check if there are more spaces
+            if len(results) < limit:
+                break
+                
+            # Check the '_links' for a 'next' link
+            links = spaces.get("_links", {})
+            if not links.get("next"):
+                break
+                
+            start += limit
+                
+        logger.info(f"Retrieved a total of {len(all_spaces)} spaces")
+        return all_spaces
+
+    def try_basic_api_call(self):
+        """
+        Try a different API endpoint to check connectivity and permissions.
+        """
+        try:
+            logger.info("Trying basic API call to /content/search...")
+            response = requests.get(
+                f"{self.api_url}/content/search",
+                auth=self.auth,
+                headers=self.headers,
+                params={"cql": "type=page", "limit": 1},
+                verify=False
+            )
+            response.raise_for_status()
+            
+            # Print raw response for debugging
+            raw_content = response.text
+            logger.info(f"Raw response from basic API call: {raw_content[:500]}...")
+            
+            return {
+                "status_code": response.status_code,
+                "content_length": len(raw_content),
+                "is_json": self._is_valid_json(raw_content)
+            }
+        except requests.RequestException as e:
+            logger.error(f"Basic API call failed: {str(e)}")
+            if hasattr(e, 'response') and e.response is not None:
+                logger.error(f"Status code: {e.response.status_code}")
+                return {
+                    "status_code": e.response.status_code,
+                    "error": str(e),
+                    "content": e.response.text[:500] if hasattr(e.response, 'text') else None
+                }
+            return {"error": str(e)}
+
+    def _is_valid_json(self, text):
+        """Check if a string is valid JSON."""
+        if not text or not text.strip():
+            return False
+            
+        try:
+            json.loads(text)
+            return True
+        except json.JSONDecodeError:
+            return False
+
+# Script execution
+if __name__ == "__main__":
+    # Use environment variables or command line arguments for better security
+    confluence_url = os.environ.get("CONFLUENCE_URL", "https://cmegroup.atlassian.net")
+    username = os.environ.get("CONFLUENCE_USERNAME", "cli_api_user")
+    api_token = os.environ.get("CONFLUENCE_API_TOKEN", "your-api-token-here")
+    
+    # Create the client
+    client = ConfluenceClient(confluence_url, username, api_token)
+    
+    # Test the connection
+    if client.test_connection():
+        print("\n✅ Connection to Confluence successful!")
+    else:
+        print("\n❌ Failed to connect to Confluence. Check log for details.")
+        
+        # Try a basic API call to diagnose issues
+        print("\nTrying a basic API call to diagnose issues...")
+        result = client.try_basic_api_call()
+        print(f"Basic API call result: {result}")
+        
+        # Continue with the script anyway to see if other calls work
+    
+    # Get all spaces (if access is available)
+    try:
+        spaces = client.get_all_spaces()
+        if spaces:
+            print(f"\n✅ Successfully retrieved {len(spaces)} spaces")
+            if len(spaces) > 0:
+                print("Sample spaces:")
+                for space in spaces[:3]:  # Show top 3
+                    print(f"  - {space.get('name')} (Key: {space.get('key')})")
+        else:
+            print("\n❌ Failed to retrieve spaces or no spaces available")
+    except Exception as e:
+        print(f"\n❌ Error retrieving spaces: {str(e)}")
+    
+    # Search for content
+    search_title = "Test"
+    search_results = client.search_content(title=search_title)
+    if search_results and search_results.get("results"):
+        print(f"\n✅ Search for '{search_title}' returned {len(search_results.get('results'))} results")
+        for page in search_results.get("results")[:3]:  # Show top 3
+            print(f"  - {page.get('title')} (ID: {page.get('id')})")
+    else:
+        print(f"\n❌ Search for '{search_title}' failed or returned no results")
+    
+    # Get all content
+    try:
+        all_pages = client.get_all_content(content_type="page", limit=25)
+        if all_pages:
+            print(f"\n✅ Retrieved {len(all_pages)} pages from Confluence")
+            if len(all_pages) > 0:
+                print("Sample pages:")
+                for page in all_pages[:3]:  # Show top 3
+                    print(f"  - {page.get('title')} (ID: {page.get('id')})")
+        else:
+            print("\n❌ Failed to retrieve pages or no pages available")
+    except Exception as e:
+        print(f"\n❌ Error retrieving pages: {str(e)}")
+    
+    print("\nConfluence integration test completed.")
+
+
+
+
+
+
+
+
+
+
+import requests
+import logging
+import json
+import os
+import sys
+from requests.auth import HTTPBasicAuth
 from urllib.parse import quote
 from datetime import datetime
 
