@@ -1,3 +1,523 @@
+import requests
+import logging
+import json
+import os
+import sys
+import urllib3
+from requests.auth import HTTPBasicAuth
+from datetime import datetime
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("jira_client.log"),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+logger = logging.getLogger("JiraClient")
+
+class JiraClient:
+    """Client for Jira REST API operations with comprehensive error handling and SSL options."""
+    
+    def __init__(self, base_url, username, api_token, ssl_verify=True, ca_bundle=None):
+        """
+        Initialize the Jira client with authentication details and SSL options.
+        
+        Args:
+            base_url: The base URL of the Jira instance (e.g., https://cmegroup-sandbox-461.atlassian.net)
+            username: The email address for authentication
+            api_token: The API token for authentication
+            ssl_verify: Whether to verify SSL certificates (set to False to disable verification - SECURITY RISK)
+            ca_bundle: Path to a CA bundle file to use for verification (alternative to disabling verification)
+        """
+        self.base_url = base_url.rstrip('/')
+        self.auth = HTTPBasicAuth(username, api_token)
+        self.api_url = f"{self.base_url}/rest/api/3"
+        self.headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+        }
+        
+        # Handle SSL verification
+        if ssl_verify is False:
+            # Disable SSL warnings if verification is disabled
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+            logger.warning("SSL certificate verification is disabled. This is not recommended for production use.")
+            self.ssl_verify = False
+        elif ca_bundle is not None:
+            # Use custom CA bundle if provided
+            if os.path.exists(ca_bundle):
+                logger.info(f"Using custom CA bundle: {ca_bundle}")
+                self.ssl_verify = ca_bundle
+            else:
+                logger.warning(f"CA bundle file not found: {ca_bundle}. Falling back to default verification.")
+                self.ssl_verify = True
+        else:
+            # Default: verify certificates
+            self.ssl_verify = True
+            
+        logger.info(f"Initialized Jira client for {self.base_url}")
+        
+    def test_connection(self):
+        """Test the connection to Jira API."""
+        try:
+            logger.info("Testing connection to Jira...")
+            # Try to get server info, which requires minimal permissions
+            response = requests.get(
+                f"{self.base_url}/rest/api/3/serverInfo",
+                auth=self.auth,
+                headers=self.headers,
+                verify=self.ssl_verify
+            )
+            response.raise_for_status()
+            server_info = response.json()
+            logger.info(f"Connection successful! Server version: {server_info.get('version', 'Unknown')}")
+            return True
+        except requests.RequestException as e:
+            logger.error(f"Connection test failed: {str(e)}")
+            if hasattr(e, 'response') and e.response is not None:
+                logger.error(f"Status code: {e.response.status_code}")
+                try:
+                    error_details = e.response.json()
+                    logger.error(f"Error details: {json.dumps(error_details, indent=2)}")
+                except:
+                    logger.error(f"Response content: {e.response.text}")
+            return False
+            
+    def get_issue(self, issue_key, fields=None, expand=None):
+        """
+        Get a specific issue by its key.
+        
+        Args:
+            issue_key: The issue key (e.g., DEMO-1)
+            fields: Comma-separated string of field names to include
+            expand: Comma-separated string of sections to expand
+        """
+        params = {}
+        if fields:
+            params["fields"] = fields
+        if expand:
+            params["expand"] = expand
+            
+        try:
+            logger.info(f"Fetching issue: {issue_key}")
+            response = requests.get(
+                f"{self.api_url}/issue/{issue_key}",
+                auth=self.auth,
+                headers=self.headers,
+                params=params,
+                verify=self.ssl_verify
+            )
+            response.raise_for_status()
+            issue = response.json()
+            logger.info(f"Successfully retrieved issue: {issue_key}")
+            return issue
+        except requests.RequestException as e:
+            logger.error(f"Failed to get issue {issue_key}: {str(e)}")
+            if hasattr(e, 'response') and e.response is not None:
+                logger.error(f"Status code: {e.response.status_code}")
+                try:
+                    error_details = e.response.json()
+                    logger.error(f"Error details: {json.dumps(error_details, indent=2)}")
+                except:
+                    logger.error(f"Response content: {e.response.text}")
+            return None
+            
+    def search_issues(self, jql, start_at=0, max_results=50, fields=None, expand=None):
+        """
+        Search for issues using JQL (Jira Query Language).
+        
+        Args:
+            jql: JQL search string
+            start_at: Starting index for pagination
+            max_results: Maximum number of results to return
+            fields: Comma-separated string of field names to include
+            expand: Comma-separated string of sections to expand
+        """
+        try:
+            params = {
+                "jql": jql,
+                "startAt": start_at,
+                "maxResults": max_results
+            }
+            
+            if fields:
+                params["fields"] = fields
+            if expand:
+                params["expand"] = expand
+                
+            logger.info(f"Searching issues with JQL: {jql}")
+            response = requests.get(
+                f"{self.api_url}/search",
+                auth=self.auth,
+                headers=self.headers,
+                params=params,
+                verify=self.ssl_verify
+            )
+            response.raise_for_status()
+            search_results = response.json()
+            total = search_results.get("total", 0)
+            results_count = len(search_results.get("issues", []))
+            logger.info(f"Search returned {results_count} issues (total: {total})")
+            return search_results
+        except requests.RequestException as e:
+            logger.error(f"Failed to search issues: {str(e)}")
+            if hasattr(e, 'response') and e.response is not None:
+                logger.error(f"Status code: {e.response.status_code}")
+                try:
+                    error_details = e.response.json()
+                    logger.error(f"Error details: {json.dumps(error_details, indent=2)}")
+                except:
+                    logger.error(f"Response content: {e.response.text}")
+            return None
+    
+    def get_all_issues(self, jql, fields=None, expand=None, max_results=1000):
+        """
+        Get all issues matching a JQL query, handling pagination.
+        
+        Args:
+            jql: JQL search string
+            fields: Comma-separated string of field names to include
+            expand: Comma-separated string of sections to expand
+            max_results: Maximum total number of results to return
+        """
+        all_issues = []
+        start_at = 0
+        page_size = 100  # Jira recommends 100 for optimal performance
+        
+        logger.info(f"Retrieving all issues matching JQL: {jql}")
+        
+        while True:
+            try:
+                search_results = self.search_issues(
+                    jql=jql, 
+                    start_at=start_at, 
+                    max_results=page_size,
+                    fields=fields,
+                    expand=expand
+                )
+                
+                if not search_results or not search_results.get("issues"):
+                    break
+                    
+                issues = search_results.get("issues", [])
+                all_issues.extend(issues)
+                logger.info(f"Retrieved {len(issues)} issues (total: {len(all_issues)})")
+                
+                # Check if we've reached the total or our max limit
+                if len(all_issues) >= min(search_results.get("total", 0), max_results):
+                    break
+                    
+                # Move to next page
+                start_at += len(issues)
+                
+                # If no issues were returned, we're done
+                if len(issues) == 0:
+                    break
+            except Exception as e:
+                logger.error(f"Error retrieving all issues: {str(e)}")
+                break
+                
+        logger.info(f"Retrieved a total of {len(all_issues)} issues")
+        return all_issues
+    
+    def get_issue_types(self):
+        """Get all issue types defined in the Jira instance."""
+        try:
+            logger.info("Fetching issue types...")
+            response = requests.get(
+                f"{self.api_url}/issuetype",
+                auth=self.auth,
+                headers=self.headers,
+                verify=self.ssl_verify
+            )
+            response.raise_for_status()
+            issue_types = response.json()
+            logger.info(f"Successfully retrieved {len(issue_types)} issue types")
+            return issue_types
+        except requests.RequestException as e:
+            logger.error(f"Failed to get issue types: {str(e)}")
+            if hasattr(e, 'response') and e.response is not None:
+                logger.error(f"Status code: {e.response.status_code}")
+                try:
+                    error_details = e.response.json()
+                    logger.error(f"Error details: {json.dumps(error_details, indent=2)}")
+                except:
+                    logger.error(f"Response content: {e.response.text}")
+            return None
+    
+    def get_projects(self):
+        """Get all projects visible to the authenticated user."""
+        try:
+            logger.info("Fetching projects...")
+            response = requests.get(
+                f"{self.api_url}/project",
+                auth=self.auth,
+                headers=self.headers,
+                verify=self.ssl_verify
+            )
+            response.raise_for_status()
+            projects = response.json()
+            logger.info(f"Successfully retrieved {len(projects)} projects")
+            return projects
+        except requests.RequestException as e:
+            logger.error(f"Failed to get projects: {str(e)}")
+            if hasattr(e, 'response') and e.response is not None:
+                logger.error(f"Status code: {e.response.status_code}")
+                try:
+                    error_details = e.response.json()
+                    logger.error(f"Error details: {json.dumps(error_details, indent=2)}")
+                except:
+                    logger.error(f"Response content: {e.response.text}")
+            return None
+    
+    def create_issue(self, project_key, issue_type, summary, description, fields=None):
+        """
+        Create a new issue.
+        
+        Args:
+            project_key: The project key
+            issue_type: The issue type name or ID
+            summary: The issue summary
+            description: The issue description
+            fields: Dictionary of additional fields to set
+        """
+        # Base issue data
+        issue_data = {
+            "fields": {
+                "project": {
+                    "key": project_key
+                },
+                "summary": summary,
+                "description": {
+                    "type": "doc",
+                    "version": 1,
+                    "content": [
+                        {
+                            "type": "paragraph",
+                            "content": [
+                                {
+                                    "type": "text",
+                                    "text": description
+                                }
+                            ]
+                        }
+                    ]
+                },
+                "issuetype": {
+                    "name": issue_type
+                }
+            }
+        }
+        
+        # Add additional fields if provided
+        if fields:
+            issue_data["fields"].update(fields)
+            
+        try:
+            logger.info(f"Creating issue in project {project_key} of type {issue_type}")
+            response = requests.post(
+                f"{self.api_url}/issue",
+                auth=self.auth,
+                headers=self.headers,
+                json=issue_data,
+                verify=self.ssl_verify
+            )
+            response.raise_for_status()
+            new_issue = response.json()
+            logger.info(f"Successfully created issue: {new_issue.get('key')}")
+            return new_issue
+        except requests.RequestException as e:
+            logger.error(f"Failed to create issue: {str(e)}")
+            if hasattr(e, 'response') and e.response is not None:
+                logger.error(f"Status code: {e.response.status_code}")
+                try:
+                    error_details = e.response.json()
+                    logger.error(f"Error details: {json.dumps(error_details, indent=2)}")
+                except:
+                    logger.error(f"Response content: {e.response.text}")
+            return None
+    
+    def get_issue_content(self, issue_key):
+        """
+        Get the content of an issue in a format suitable for RAG.
+        
+        Args:
+            issue_key: The issue key (e.g., DEMO-1)
+        """
+        try:
+            # Get issue with all relevant fields
+            fields_to_include = "summary,description,issuetype,status,created,updated,assignee,reporter,priority,labels,components,fixVersions,resolution,comment"
+            issue = self.get_issue(issue_key, fields=fields_to_include)
+            
+            if not issue:
+                return None
+                
+            fields = issue.get("fields", {})
+            
+            # Extract key metadata
+            metadata = {
+                "key": issue.get("key"),
+                "id": issue.get("id"),
+                "type": fields.get("issuetype", {}).get("name"),
+                "status": fields.get("status", {}).get("name"),
+                "created": fields.get("created"),
+                "updated": fields.get("updated"),
+                "priority": fields.get("priority", {}).get("name") if fields.get("priority") else None,
+                "labels": fields.get("labels", []),
+                "resolution": fields.get("resolution", {}).get("name") if fields.get("resolution") else None,
+                "url": f"{self.base_url}/browse/{issue.get('key')}"
+            }
+            
+            # Extract people
+            if fields.get("assignee"):
+                metadata["assignee"] = fields.get("assignee", {}).get("displayName")
+                
+            if fields.get("reporter"):
+                metadata["reporter"] = fields.get("reporter", {}).get("displayName")
+            
+            # Extract content fields
+            content_parts = []
+            
+            # Add summary
+            summary = fields.get("summary", "")
+            if summary:
+                content_parts.append(f"Summary: {summary}")
+            
+            # Add description
+            # Note: this is simplified and assumes the description is in plain text
+            # In reality, Jira descriptions can be in various formats
+            description = fields.get("description")
+            if description:
+                if isinstance(description, dict):
+                    # Try to extract text from Atlassian Document Format
+                    desc_text = self._extract_text_from_adf(description)
+                    if desc_text:
+                        content_parts.append(f"Description: {desc_text}")
+                else:
+                    content_parts.append(f"Description: {description}")
+            
+            # Add comments
+            comments = fields.get("comment", {}).get("comments", [])
+            for comment in comments:
+                author = comment.get("author", {}).get("displayName", "Unknown")
+                created = comment.get("created", "")
+                
+                comment_body = comment.get("body")
+                if isinstance(comment_body, dict):
+                    # Extract text from Atlassian Document Format
+                    comment_text = self._extract_text_from_adf(comment_body)
+                    if comment_text:
+                        content_parts.append(f"Comment by {author} on {created}: {comment_text}")
+                else:
+                    content_parts.append(f"Comment by {author} on {created}: {comment_body}")
+            
+            # Combine all content
+            full_content = "\n\n".join(content_parts)
+            
+            return {
+                "metadata": metadata,
+                "content": full_content
+            }
+        except Exception as e:
+            logger.error(f"Error processing issue content: {str(e)}")
+            return None
+    
+    def _extract_text_from_adf(self, adf_doc):
+        """
+        Extract plain text from Atlassian Document Format (ADF).
+        This is a simplified version that doesn't handle all ADF features.
+        
+        Args:
+            adf_doc: The ADF document object
+        """
+        if not adf_doc or not isinstance(adf_doc, dict):
+            return ""
+            
+        text_parts = []
+        
+        def extract_from_content(content_list):
+            parts = []
+            if not content_list or not isinstance(content_list, list):
+                return parts
+                
+            for item in content_list:
+                if not isinstance(item, dict):
+                    continue
+                    
+                # Extract text nodes
+                if item.get("type") == "text":
+                    parts.append(item.get("text", ""))
+                
+                # Extract text from content recursively
+                if "content" in item and isinstance(item["content"], list):
+                    parts.extend(extract_from_content(item["content"]))
+            
+            return parts
+        
+        # Extract text from the main content array
+        if "content" in adf_doc and isinstance(adf_doc["content"], list):
+            text_parts = extract_from_content(adf_doc["content"])
+        
+        return " ".join(text_parts)
+
+# Script execution
+if __name__ == "__main__":
+    # Use environment variables or command line args for better security
+    jira_url = os.environ.get("JIRA_URL", "https://cmegroup-sandbox-461.atlassian.net")
+    username = os.environ.get("JIRA_USERNAME", "firstname.lastname@cmegroup.com")
+    api_token = os.environ.get("JIRA_API_TOKEN", "your-api-token-here")
+    
+    # SSL verification options
+    # Option 1: Use default verification
+    # ssl_verify = True
+    
+    # Option 2: Disable verification (NOT RECOMMENDED for production)
+    ssl_verify = False
+    
+    # Option 3: Use custom CA bundle
+    # ssl_verify = "/path/to/your/ca-bundle.pem"
+    
+    # Create the client with SSL verification settings
+    client = JiraClient(jira_url, username, api_token, ssl_verify=ssl_verify)
+    
+    # Test the connection
+    if client.test_connection():
+        print("\n✅ Connection to Jira successful!")
+    else:
+        print("\n❌ Failed to connect to Jira. Check log for details.")
+        sys.exit(1)
+    
+    # Get projects
+    projects = client.get_projects()
+    if projects:
+        print(f"\n✅ Successfully retrieved {len(projects)} projects")
+        if len(projects) > 0:
+            print("Sample projects:")
+            for project in projects[:3]:  # Show top 3
+                print(f"  - {project.get('name')} (Key: {project.get('key')})")
+    else:
+        print("\n❌ Failed to retrieve projects")
+    
+    # Rest of the code remains the same...
+    print("\nJira integration test completed.")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 from atlassian import Confluence
 import logging
 import sys
