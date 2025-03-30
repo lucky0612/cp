@@ -1,3 +1,653 @@
+import json
+import requests
+import logging
+import os
+import sys
+import urllib3
+from datetime import datetime, timedelta
+import time
+import getpass
+from urllib.parse import quote
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("remedy_client.log"),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+logger = logging.getLogger("RemedyClient")
+
+class RemedyClient:
+    """
+    Client for BMC Remedy REST API operations with comprehensive error handling and advanced querying.
+    """
+    
+    def __init__(self, server_url, username=None, password=None, ssl_verify=False):
+        """
+        Initialize the Remedy client with server and authentication details.
+        
+        Args:
+            server_url: The base URL of the Remedy server (e.g., https://cmegroup-restapi.onbmc.com)
+            username: Username for authentication (will prompt if None)
+            password: Password for authentication (will prompt if None)
+            ssl_verify: Whether to verify SSL certificates (set to False to disable verification)
+        """
+        self.server_url = server_url.rstrip('/')
+        self.username = username
+        self.password = password
+        self.token = None
+        self.token_type = "AR-JWT"
+        
+        # Handle SSL verification
+        if ssl_verify is False:
+            # Disable SSL warnings if verification is disabled
+            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+            logger.warning("SSL certificate verification is disabled.")
+            self.ssl_verify = False
+        else:
+            self.ssl_verify = True
+            
+        logger.info(f"Initialized Remedy client for {self.server_url}")
+    
+    def login(self):
+        """
+        Log in to Remedy and get authentication token.
+        
+        Returns:
+            tuple: (returnVal, token) where returnVal is 1 on success, -1 on failure
+        """
+        if not self.username:
+            self.username = input("Enter Username: ")
+        
+        if not self.password:
+            self.password = getpass.getpass(prompt="Enter Password: ")
+        
+        logger.info(f"Attempting to login as {self.username}")
+        
+        url = f"{self.server_url}/api/jwt/login"
+        payload = {"username": self.username, "password": self.password}
+        headers = {"content-type": "application/x-www-form-urlencoded"}
+        
+        try:
+            r = requests.post(url, data=payload, headers=headers, verify=self.ssl_verify)
+            
+            if r.status_code == 200:
+                self.token = r.text
+                logger.info("Login successful")
+                return 1, self.token
+            else:
+                logger.error(f"Login failed with status code: {r.status_code}")
+                print(f"Failure...")
+                print(f"Status Code: {r.status_code}")
+                return -1, r.text
+        except Exception as e:
+            logger.error(f"Login error: {str(e)}")
+            return -1, str(e)
+    
+    def logout(self):
+        """
+        Log out from Remedy and invalidate the token.
+        
+        Returns:
+            bool: True on success, False on failure
+        """
+        if not self.token:
+            logger.warning("Cannot logout: No active token")
+            return False
+        
+        logger.info("Logging out and invalidating token")
+        
+        url = f"{self.server_url}/api/jwt/logout"
+        headers = {"Authorization": f"{self.token_type} {self.token}"}
+        
+        try:
+            r = requests.post(url, headers=headers, verify=self.ssl_verify)
+            
+            if r.status_code == 204 or r.status_code == 200:
+                logger.info("Logout successful")
+                self.token = None
+                return True
+            else:
+                logger.error(f"Logout failed with status code: {r.status_code}")
+                return False
+        except Exception as e:
+            logger.error(f"Logout error: {str(e)}")
+            return False
+    
+    def get_incident(self, incident_id):
+        """
+        Get a specific incident by its ID.
+        
+        Args:
+            incident_id: The Incident Number (e.g., INC000001482087)
+            
+        Returns:
+            dict: Incident data or None if not found/error
+        """
+        if not self.token:
+            logger.error("No authentication token. Please login first.")
+            return None
+        
+        logger.info(f"Fetching incident: {incident_id}")
+        
+        # Create qualified query
+        qualified_query = f"'Incident Number'=\"{incident_id}\""
+        
+        # Fields to retrieve
+        fields = [
+            "Assignee", "Incident Number", "Description", "Status", "Owner", 
+            "Submitter", "Impact", "Owner Group", "Submit Date", "Assigned Group", 
+            "Priority", "Environment", "Summary", "Support Group Name", 
+            "Request Assignee", "Work Order ID", "Request Manager"
+        ]
+        
+        # Get the incident data
+        result = self.query_form("HPD:Help Desk", qualified_query, fields)
+        
+        if result and "entries" in result and len(result["entries"]) > 0:
+            logger.info(f"Successfully retrieved incident: {incident_id}")
+            return result["entries"][0]
+        else:
+            logger.error(f"Incident not found or error: {incident_id}")
+            return None
+    
+    def get_incidents_by_date(self, date, status=None, owner_group=None):
+        """
+        Get all incidents submitted on a specific date.
+        
+        Args:
+            date: The submission date in YYYY-MM-DD format
+            status: Optional status filter (e.g., "Closed", "Open")
+            owner_group: Optional owner group filter
+            
+        Returns:
+            list: List of incidents or empty list if none found/error
+        """
+        if not self.token:
+            logger.error("No authentication token. Please login first.")
+            return []
+        
+        logger.info(f"Fetching incidents for date: {date}")
+        
+        # Parse the date and create date range (entire day)
+        try:
+            date_obj = datetime.strptime(date, "%Y-%m-%d")
+            start_datetime = date_obj.strftime("%Y-%m-%d 00:00:00.000")
+            end_datetime = (date_obj + timedelta(days=1)).strftime("%Y-%m-%d 00:00:00.000")
+            
+            # Create qualified query
+            query_parts = [f"'Submit Date' >= \"{start_datetime}\" AND 'Submit Date' < \"{end_datetime}\""]
+            
+            # Add status filter if provided
+            if status:
+                query_parts.append(f"'Status'=\"{status}\"")
+            
+            # Add owner group filter if provided
+            if owner_group:
+                query_parts.append(f"'Owner Group'=\"{owner_group}\"")
+            
+            qualified_query = " AND ".join(query_parts)
+            
+            # Fields to retrieve
+            fields = [
+                "Assignee", "Incident Number", "Description", "Status", "Owner", 
+                "Submitter", "Impact", "Owner Group", "Submit Date", "Assigned Group", 
+                "Priority", "Environment", "Summary", "Support Group Name", 
+                "Request Assignee", "Work Order ID", "Request Manager"
+            ]
+            
+            # Get the incidents
+            result = self.query_form("HPD:Help Desk", qualified_query, fields)
+            
+            if result and "entries" in result:
+                logger.info(f"Retrieved {len(result['entries'])} incidents for date {date}")
+                return result["entries"]
+            else:
+                logger.warning(f"No incidents found for date {date} or error occurred")
+                return []
+                
+        except ValueError:
+            logger.error(f"Invalid date format: {date}. Use YYYY-MM-DD.")
+            return []
+    
+    def get_incidents_by_status(self, status, limit=100):
+        """
+        Get incidents by their status.
+        
+        Args:
+            status: The status to filter by (e.g., "Open", "Closed", "Resolved")
+            limit: Maximum number of incidents to retrieve
+            
+        Returns:
+            list: List of incidents or empty list if none found/error
+        """
+        if not self.token:
+            logger.error("No authentication token. Please login first.")
+            return []
+        
+        logger.info(f"Fetching incidents with status: {status}")
+        
+        # Create qualified query
+        qualified_query = f"'Status'=\"{status}\""
+        
+        # Fields to retrieve
+        fields = [
+            "Assignee", "Incident Number", "Description", "Status", "Owner", 
+            "Submitter", "Impact", "Owner Group", "Submit Date", "Assigned Group", 
+            "Priority", "Environment", "Summary", "Support Group Name", 
+            "Request Assignee", "Work Order ID", "Request Manager"
+        ]
+        
+        # Get the incidents
+        result = self.query_form("HPD:Help Desk", qualified_query, fields, limit=limit)
+        
+        if result and "entries" in result:
+            logger.info(f"Retrieved {len(result['entries'])} incidents with status {status}")
+            return result["entries"]
+        else:
+            logger.warning(f"No incidents found with status {status} or error occurred")
+            return []
+    
+    def get_incidents_by_assignee(self, assignee, limit=100):
+        """
+        Get incidents assigned to a specific person.
+        
+        Args:
+            assignee: The assignee name
+            limit: Maximum number of incidents to retrieve
+            
+        Returns:
+            list: List of incidents or empty list if none found/error
+        """
+        if not self.token:
+            logger.error("No authentication token. Please login first.")
+            return []
+        
+        logger.info(f"Fetching incidents assigned to: {assignee}")
+        
+        # Create qualified query
+        qualified_query = f"'Assignee'=\"{assignee}\""
+        
+        # Fields to retrieve
+        fields = [
+            "Assignee", "Incident Number", "Description", "Status", "Owner", 
+            "Submitter", "Impact", "Owner Group", "Submit Date", "Assigned Group", 
+            "Priority", "Environment", "Summary", "Support Group Name", 
+            "Request Assignee", "Work Order ID", "Request Manager"
+        ]
+        
+        # Get the incidents
+        result = self.query_form("HPD:Help Desk", qualified_query, fields, limit=limit)
+        
+        if result and "entries" in result:
+            logger.info(f"Retrieved {len(result['entries'])} incidents assigned to {assignee}")
+            return result["entries"]
+        else:
+            logger.warning(f"No incidents found assigned to {assignee} or error occurred")
+            return []
+    
+    def query_form(self, form_name, qualified_query=None, fields=None, limit=100):
+        """
+        Query a Remedy form with optional filters and field selection.
+        
+        Args:
+            form_name: The name of the form to query (e.g., "HPD:Help Desk")
+            qualified_query: Optional qualified query string for filtering
+            fields: Optional list of fields to retrieve
+            limit: Maximum number of records to retrieve
+            
+        Returns:
+            dict: Query result or None if error
+        """
+        if not self.token:
+            logger.error("No authentication token. Please login first.")
+            return None
+        
+        logger.info(f"Querying form: {form_name}")
+        
+        # Build URL
+        url = f"{self.server_url}/api/arsys/v1/entry/{form_name}"
+        
+        # Build headers
+        headers = {"Authorization": f"{self.token_type} {self.token}"}
+        
+        # Build query parameters
+        params = {}
+        
+        if qualified_query:
+            params["q"] = qualified_query
+        
+        if fields:
+            params["fields"] = ",".join(fields)
+        
+        if limit:
+            params["limit"] = limit
+        
+        # Make the request
+        try:
+            r = requests.get(url, headers=headers, params=params, verify=self.ssl_verify)
+            
+            if r.status_code == 200:
+                result = r.json()
+                logger.info(f"Successfully queried form {form_name} and got {len(result.get('entries', []))} results")
+                return result
+            else:
+                logger.error(f"Query failed with status code: {r.status_code}")
+                logger.error(f"Headers: {r.headers}")
+                logger.error(f"Response: {r.text}")
+                return None
+        except Exception as e:
+            logger.error(f"Query error: {str(e)}")
+            return None
+    
+    def create_incident(self, summary, description, impact="4-Minor/Localized", urgency="4-Low", 
+                      reported_source="Direct Input", service_type="User Service Restoration", 
+                      assigned_group=None):
+        """
+        Create a new incident in Remedy.
+        
+        Args:
+            summary: Incident summary/title
+            description: Detailed description
+            impact: Impact level (1-5)
+            urgency: Urgency level (1-4)
+            reported_source: How the incident was reported
+            service_type: Type of service
+            assigned_group: Group to assign the incident to
+            
+        Returns:
+            dict: Created incident data or None if error
+        """
+        if not self.token:
+            logger.error("No authentication token. Please login first.")
+            return None
+        
+        logger.info(f"Creating new incident: {summary}")
+        
+        # Build URL
+        url = f"{self.server_url}/api/arsys/v1/entry/HPD:Help Desk"
+        
+        # Build headers
+        headers = {
+            "Authorization": f"{self.token_type} {self.token}",
+            "Content-Type": "application/json"
+        }
+        
+        # Build incident data
+        incident_data = {
+            "values": {
+                "Summary": summary,
+                "Description": description,
+                "Impact": impact,
+                "Urgency": urgency,
+                "Reported Source": reported_source,
+                "Service Type": service_type
+            }
+        }
+        
+        if assigned_group:
+            incident_data["values"]["Assigned Group"] = assigned_group
+        
+        # Make the request
+        try:
+            r = requests.post(url, headers=headers, json=incident_data, verify=self.ssl_verify)
+            
+            if r.status_code == 201:
+                result = r.json()
+                logger.info(f"Successfully created incident: {result.get('values', {}).get('Incident Number')}")
+                return result
+            else:
+                logger.error(f"Create incident failed with status code: {r.status_code}")
+                logger.error(f"Response: {r.text}")
+                return None
+        except Exception as e:
+            logger.error(f"Create incident error: {str(e)}")
+            return None
+    
+    def update_incident(self, incident_id, update_data):
+        """
+        Update an existing incident.
+        
+        Args:
+            incident_id: The Incident Number to update
+            update_data: Dictionary of fields to update
+            
+        Returns:
+            bool: True on success, False on failure
+        """
+        if not self.token:
+            logger.error("No authentication token. Please login first.")
+            return False
+        
+        logger.info(f"Updating incident: {incident_id}")
+        
+        # Build URL
+        url = f"{self.server_url}/api/arsys/v1/entry/HPD:Help Desk"
+        qualified_query = f"'Incident Number'=\"{incident_id}\""
+        url = f"{url}?q={quote(qualified_query)}"
+        
+        # Build headers
+        headers = {
+            "Authorization": f"{self.token_type} {self.token}",
+            "Content-Type": "application/json"
+        }
+        
+        # Build update data
+        payload = {
+            "values": update_data
+        }
+        
+        # Make the request
+        try:
+            r = requests.put(url, headers=headers, json=payload, verify=self.ssl_verify)
+            
+            if r.status_code == 204:
+                logger.info(f"Successfully updated incident: {incident_id}")
+                return True
+            else:
+                logger.error(f"Update incident failed with status code: {r.status_code}")
+                logger.error(f"Response: {r.text}")
+                return False
+        except Exception as e:
+            logger.error(f"Update incident error: {str(e)}")
+            return False
+    
+    def get_incident_history(self, incident_id):
+        """
+        Get the history of changes for a specific incident.
+        
+        Args:
+            incident_id: The Incident Number
+            
+        Returns:
+            list: History entries or empty list if none found/error
+        """
+        if not self.token:
+            logger.error("No authentication token. Please login first.")
+            return []
+        
+        logger.info(f"Fetching history for incident: {incident_id}")
+        
+        # Build URL for history form
+        url = f"{self.server_url}/api/arsys/v1/entry/HPD:Help Desk History"
+        
+        # Qualified query to filter by incident number
+        qualified_query = f"'Incident Number'=\"{incident_id}\""
+        
+        # Headers
+        headers = {"Authorization": f"{self.token_type} {self.token}"}
+        
+        # Query parameters
+        params = {
+            "q": qualified_query,
+            "fields": "History Date Time,Action,Description,Status,Changed By,Assigned Group"
+        }
+        
+        # Make the request
+        try:
+            r = requests.get(url, headers=headers, params=params, verify=self.ssl_verify)
+            
+            if r.status_code == 200:
+                result = r.json()
+                logger.info(f"Successfully retrieved history for incident {incident_id} with {len(result.get('entries', []))} entries")
+                return result.get("entries", [])
+            else:
+                logger.error(f"Get history failed with status code: {r.status_code}")
+                logger.error(f"Response: {r.text}")
+                return []
+        except Exception as e:
+            logger.error(f"Get history error: {str(e)}")
+            return []
+    
+    def process_incident_for_rag(self, incident):
+        """
+        Process an incident into a format suitable for RAG indexing.
+        
+        Args:
+            incident: Raw incident data from Remedy API
+            
+        Returns:
+            dict: Processed incident with metadata and content
+        """
+        if not incident or "values" not in incident:
+            return None
+        
+        values = incident.get("values", {})
+        
+        # Extract metadata
+        metadata = {
+            "incident_number": values.get("Incident Number"),
+            "status": values.get("Status"),
+            "priority": values.get("Priority"),
+            "impact": values.get("Impact"),
+            "assignee": values.get("Assignee"),
+            "owner": values.get("Owner"),
+            "owner_group": values.get("Owner Group"),
+            "assigned_group": values.get("Assigned Group"),
+            "submitter": values.get("Submitter"),
+            "submit_date": values.get("Submit Date"),
+            "summary": values.get("Summary")
+        }
+        
+        # Build content for embedding
+        content_parts = []
+        
+        if values.get("Summary"):
+            content_parts.append(f"Summary: {values.get('Summary')}")
+        
+        if values.get("Description"):
+            content_parts.append(f"Description: {values.get('Description')}")
+        
+        if values.get("Status"):
+            content_parts.append(f"Status: {values.get('Status')}")
+        
+        if values.get("Priority"):
+            content_parts.append(f"Priority: {values.get('Priority')}")
+        
+        if values.get("Impact"):
+            content_parts.append(f"Impact: {values.get('Impact')}")
+        
+        if values.get("Assignee"):
+            content_parts.append(f"Assigned to: {values.get('Assignee')}")
+        
+        if values.get("Owner Group"):
+            content_parts.append(f"Owner Group: {values.get('Owner Group')}")
+        
+        # Combine content parts into a single text
+        content = "\n".join(content_parts)
+        
+        return {
+            "metadata": metadata,
+            "content": content,
+            "raw_data": values
+        }
+
+# Example usage
+def test_remedy_client():
+    # Create the client
+    server_url = "https://cmegroup-restapi.onbmc.com"
+    client = RemedyClient(server_url, ssl_verify=False)
+    
+    # Login
+    status, token = client.login()
+    if status != 1:
+        print("Failed to login. Exiting.")
+        return
+    
+    print("Successfully logged in!")
+    
+    # Get a specific incident
+    incident_id = input("Enter Incident Number: ")
+    incident = client.get_incident(incident_id)
+    
+    if incident:
+        # Process the incident for display
+        processed = client.process_incident_for_rag(incident)
+        print("\nIncident Details:")
+        print(f"Incident Number: {processed['metadata']['incident_number']}")
+        print(f"Summary: {processed['metadata']['summary']}")
+        print(f"Status: {processed['metadata']['status']}")
+        print(f"Owner: {processed['metadata']['owner']}")
+        print(f"Description: {processed['raw_data'].get('Description', 'N/A')[:100]}...")
+    else:
+        print(f"Could not find incident {incident_id}")
+    
+    # Try a more complex query: closed incidents from a specific owner group
+    print("\nFetching closed incidents owned by TOCC Support:")
+    closed_incidents = client.query_form(
+        "HPD:Help Desk",
+        "'Status'=\"Closed\" AND 'Owner Group'=\"TOCC Support\"",
+        ["Incident Number", "Summary", "Status", "Submit Date", "Owner Group"],
+        limit=5
+    )
+    
+    if closed_incidents and "entries" in closed_incidents:
+        print(f"Found {len(closed_incidents['entries'])} incidents")
+        
+        for i, inc in enumerate(closed_incidents['entries'][:5], 1):
+            values = inc.get('values', {})
+            print(f"\n{i}. {values.get('Incident Number')} - {values.get('Summary')}")
+            print(f"   Status: {values.get('Status')} | Submitted: {values.get('Submit Date')}")
+    
+    # Query by date example
+    print("\nEnter a date to find incidents (YYYY-MM-DD):")
+    date_query = input("> ")
+    date_incidents = client.get_incidents_by_date(date_query)
+    
+    if date_incidents:
+        print(f"Found {len(date_incidents)} incidents on {date_query}")
+        
+        for i, inc in enumerate(date_incidents[:5], 1):
+            values = inc.get('values', {})
+            print(f"\n{i}. {values.get('Incident Number')} - {values.get('Summary')}")
+            print(f"   Status: {values.get('Status')} | Owner: {values.get('Owner')}")
+    else:
+        print(f"No incidents found for date {date_query}")
+    
+    # Clean up
+    client.logout()
+    print("\nLogged out successfully!")
+
+if __name__ == "__main__":
+    test_remedy_client()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import requests
 import logging
 import json
