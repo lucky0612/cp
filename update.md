@@ -4,6 +4,211 @@ import logging
 import os
 import sys
 from datetime import datetime
+import vertexai
+from vertexai.generative_models import GenerationConfig, GenerativeModel
+from google.api_core.exceptions import GoogleAPICallError
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("gemini_test.log"),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+logger = logging.getLogger("GeminiTest")
+
+# Configuration (Environment Variables or Config File)
+PROJECT_ID = os.environ.get("PROJECT_ID", "prj-dv-cws-4363")
+REGION = os.environ.get("REGION", "us-central1")
+MODEL_NAME = os.environ.get("MODEL_NAME", "gemini-2.0-flash-001")
+
+def test_gemini_connection(prompt="Tell me about Vertex AI and Gemini models."):
+    """
+    Test connection to Gemini model via Vertex AI using the vertexai SDK directly.
+    
+    Args:
+        prompt (str): The prompt to send to Gemini.
+        
+    Returns:
+        str: The response from Gemini.
+    """
+    logger.info(f"Project ID: {PROJECT_ID}")
+    logger.info(f"Location: {REGION}")
+    logger.info(f"Model: {MODEL_NAME}")
+    logger.info(f"Prompt: {prompt}")
+    
+    try:
+        # Initialize Vertex AI
+        vertexai.init(project=PROJECT_ID, location=REGION)
+        
+        # Create model instance
+        model = GenerativeModel(MODEL_NAME)
+        logger.info(f"Using model: {MODEL_NAME}")
+        
+        # Configure generation parameters
+        generation_config = GenerationConfig(
+            temperature=0.7,
+            top_p=0.95,
+            max_output_tokens=8192,
+        )
+        
+        # Generate response - streaming
+        logger.info("Generating response...")
+        response_text = ""
+        for chunk in model.generate_content(
+            prompt,
+            generation_config=generation_config,
+            stream=True,
+        ):
+            if chunk.candidates and chunk.candidates[0].text:
+                response_text += chunk.candidates[0].text
+                print(".", end="", flush=True)  # Show progress
+        
+        print()  # New line after progress indicator
+        
+        logger.info(f"Response length: {len(response_text)} characters")
+        return response_text
+        
+    except Exception as e:
+        logger.error(f"Unexpected error: {str(e)}")
+        return f"Error: {str(e)}"
+
+def test_non_streaming():
+    """Test non-streaming version of the API"""
+    try:
+        # Initialize Vertex AI
+        vertexai.init(project=PROJECT_ID, location=REGION)
+        
+        # Create model instance
+        model = GenerativeModel(MODEL_NAME)
+        
+        # Configure generation parameters
+        generation_config = GenerationConfig(
+            temperature=0.7,
+            top_p=0.95,
+            max_output_tokens=1024,
+        )
+        
+        # Generate response - non-streaming
+        response = model.generate_content(
+            "Write a short poem about AI in 4 lines.",
+            generation_config=generation_config,
+        )
+        
+        if response.candidates and response.candidates[0].text:
+            response_text = response.candidates[0].text
+            logger.info("Non-streaming response:")
+            logger.info(response_text)
+            return response_text
+        return "No response generated"
+    except Exception as e:
+        logger.error(f"Non-streaming test failed: {str(e)}")
+        return f"Error: {str(e)}"
+
+class GenAIChat:
+    """Class for interacting with Gemini models via Vertex AI."""
+    
+    def __init__(self):
+        # Initialize Vertex AI
+        vertexai.init(project=PROJECT_ID, location=REGION)
+        self.model = GenerativeModel(MODEL_NAME)
+        
+    def generate_response_from_prompt(self, instructions=None, prompt=None):
+        """
+        Uses Vertex AI to generate response from a prompt.
+        
+        Args:
+            instructions (str): System instructions for the model.
+            prompt (str): The prompt.
+        Returns:
+            str: The response.
+        """
+        logger.info(f"Project id: {PROJECT_ID}")
+        logger.info(f"Location: {REGION}")
+        logger.info(f"Model: {MODEL_NAME}")
+        logger.info(f"Prompt: {prompt}")
+        
+        try:
+            # Configure generation parameters
+            generation_config = GenerationConfig(
+                temperature=2,
+                top_p=0.95,
+                max_output_tokens=8192,
+            )
+            
+            # Combine instructions and prompt if instructions are provided
+            full_prompt = prompt
+            if instructions:
+                full_prompt = f"{instructions}\n\n{prompt}"
+            
+            # Stream the response
+            response_text = ""
+            for chunk in self.model.generate_content(
+                full_prompt,
+                generation_config=generation_config,
+                stream=True,
+            ):
+                if chunk.candidates and chunk.candidates[0].text:
+                    response_text += chunk.candidates[0].text
+                    
+            return response_text
+            
+        except Exception as e:
+            logger.error(f"Error generating response: {str(e)}")
+            return f"Error generating response: {str(e)}"
+
+
+if __name__ == "__main__":
+    print("==== Testing Gemini Connection ====")
+    print("\n1. Testing with simple prompt - streaming:")
+    response = test_gemini_connection("What are the key features of Vertex AI?")
+    print("\nResponse from Gemini:")
+    print("-" * 50)
+    print(response)
+    print("-" * 50)
+    
+    print("\n2. Testing non-streaming API:")
+    non_streaming_response = test_non_streaming()
+    print("\nNon-streaming response:")
+    print("-" * 50)
+    print(non_streaming_response)
+    print("-" * 50)
+    
+    print("\n3. Testing with GenAIChat class:")
+    chat = GenAIChat()
+    instructions = "You are a helpful AI assistant that provides concise and accurate information."
+    complex_prompt = "Create a 3-day itinerary for visiting New York City for the first time."
+    class_response = chat.generate_response_from_prompt(instructions=instructions, prompt=complex_prompt)
+    print("\nResponse from GenAIChat class:")
+    print("-" * 50)
+    print(class_response)
+    print("-" * 50)
+    
+    print("\nAll tests completed.")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#!/usr/bin/env python3
+
+import logging
+import os
+import sys
+from datetime import datetime
 
 # Google Gemini imports
 from google import genai
