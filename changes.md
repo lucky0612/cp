@@ -41,6 +41,354 @@ class EmbeddingManager:
         self.tfidf_vectorizer = None
         self.svd_transformer = None
         self.is_fitted = False
+        self.actual_dimension = None  # Store actual dimension after fitting
+        
+        # Initialize the vectorizer and transformer
+        self._initialize_model()
+    
+    def _initialize_model(self):
+        """Initialize the TF-IDF vectorizer and SVD transformer."""
+        try:
+            # Initialize TF-IDF vectorizer for basic text representation
+            self.tfidf_vectorizer = TfidfVectorizer(
+                lowercase=True,
+                stop_words='english',
+                ngram_range=(1, 2),
+                max_features=10000
+            )
+            
+            # SVD transformer will be initialized during fitting
+            # based on the actual number of features
+            
+            logger.info(f"Initialized TF-IDF vectorizer for embeddings (target dimension: {self.vector_dimension})")
+        except Exception as e:
+            logger.error(f"Error initializing embedding components: {e}")
+            raise RuntimeError(f"Failed to initialize embedding components: {str(e)}")
+    
+    def _fit_on_texts(self, texts):
+        """
+        Fit the TF-IDF vectorizer and SVD transformer on texts.
+        
+        Args:
+            texts: List of input texts
+        """
+        if not texts:
+            logger.warning("No texts provided for fitting embedding model")
+            return False
+        
+        try:
+            # Fit TF-IDF vectorizer
+            tfidf_matrix = self.tfidf_vectorizer.fit_transform(texts)
+            
+            # Get actual feature count
+            n_features = tfidf_matrix.shape[1]
+            logger.info(f"TF-IDF produced {n_features} features from the input texts")
+            
+            # Determine appropriate dimension for SVD
+            # Use the smaller of vector_dimension or n_features
+            self.actual_dimension = min(self.vector_dimension, n_features)
+            
+            if self.actual_dimension < self.vector_dimension:
+                logger.warning(f"Reducing embedding dimension from {self.vector_dimension} to {self.actual_dimension} due to limited features")
+            
+            # Initialize and fit SVD transformer with appropriate dimension
+            self.svd_transformer = TruncatedSVD(
+                n_components=self.actual_dimension,
+                random_state=42
+            )
+            
+            self.svd_transformer.fit(tfidf_matrix)
+            
+            self.is_fitted = True
+            logger.info(f"Fitted embedding model on {len(texts)} texts with dimension {self.actual_dimension}")
+            return True
+        except Exception as e:
+            logger.error(f"Error fitting embedding model: {e}")
+            self.is_fitted = False
+            return False
+    
+    def get_embedding(self, text):
+        """
+        Generate embedding for a single text.
+        
+        Args:
+            text: Input text
+            
+        Returns:
+            numpy.ndarray: Embedding vector
+        """
+        if not text or not text.strip():
+            # Return zero vector for empty text
+            return np.zeros(self.vector_dimension)
+        
+        # Generate a unique cache key based on the text content
+        cache_key = f"embedding:tfidf-svd:{hashlib.md5(text.encode()).hexdigest()}"
+        cached_embedding = cache_manager.get(cache_key)
+        if cached_embedding is not None:
+            # Ensure the cached embedding has the expected dimension
+            if len(cached_embedding) == self.vector_dimension:
+                return cached_embedding
+            # If dimensions don't match, proceed to generate a new embedding
+        
+        try:
+            # If not fitted, try to fit on this single text
+            if not self.is_fitted:
+                logger.info("Attempting to fit embedding model on first text")
+                success = self._fit_on_texts([text])
+                if not success:
+                    # If fitting failed, return zero vector
+                    return np.zeros(self.vector_dimension)
+            
+            # Transform text to TF-IDF representation
+            tfidf_vector = self.tfidf_vectorizer.transform([text])
+            
+            # Check if we have features
+            if tfidf_vector.nnz == 0:
+                logger.warning("Text produced no features for embedding")
+                return np.zeros(self.vector_dimension)
+            
+            # Transform TF-IDF to lower-dimensional embedding via SVD
+            reduced_vector = self.svd_transformer.transform(tfidf_vector)[0]
+            
+            # Create the final embedding vector with the target dimension
+            embedding = np.zeros(self.vector_dimension)
+            actual_size = min(len(reduced_vector), self.vector_dimension)
+            embedding[:actual_size] = reduced_vector[:actual_size]
+            
+            # Normalize the embedding
+            norm = np.linalg.norm(embedding)
+            if norm > 0:
+                embedding = embedding / norm
+                
+            # Cache the embedding
+            cache_manager.set(cache_key, embedding)
+            
+            return embedding
+        except Exception as e:
+            logger.error(f"Error generating embedding: {e}")
+            return np.zeros(self.vector_dimension)
+    
+    def get_embeddings(self, texts, batch_size=32):
+        """
+        Generate embeddings for multiple texts.
+        
+        Args:
+            texts: List of input texts
+            batch_size: Batch size for embedding generation
+            
+        Returns:
+            List of numpy.ndarray: Embedding vectors
+        """
+        if not texts:
+            return []
+        
+        # Filter out empty texts and check cache
+        non_empty_texts = []
+        cached_embeddings = {}
+        indices_to_generate = []
+        
+        for i, text in enumerate(texts):
+            if not text or not text.strip():
+                cached_embeddings[i] = np.zeros(self.vector_dimension)
+            else:
+                cache_key = f"embedding:tfidf-svd:{hashlib.md5(text.encode()).hexdigest()}"
+                cached_embedding = cache_manager.get(cache_key)
+                
+                if cached_embedding is not None and len(cached_embedding) == self.vector_dimension:
+                    cached_embeddings[i] = cached_embedding
+                else:
+                    non_empty_texts.append(text)
+                    indices_to_generate.append(i)
+        
+        # If not fitted and we have texts, fit the model first
+        if non_empty_texts and not self.is_fitted:
+            logger.info(f"Fitting embedding model on {len(non_empty_texts)} texts")
+            self._fit_on_texts(non_empty_texts)
+        
+        # Generate embeddings for texts not in cache
+        if non_empty_texts and self.is_fitted:
+            try:
+                embeddings = []
+                for text in non_empty_texts:
+                    # Use individual embedding to handle errors individually
+                    embedding = self.get_embedding(text)
+                    embeddings.append(embedding)
+                
+                # Cache and store the new embeddings
+                for j, idx in enumerate(indices_to_generate):
+                    embedding = embeddings[j]
+                    text = texts[idx]
+                    cache_key = f"embedding:tfidf-svd:{hashlib.md5(text.encode()).hexdigest()}"
+                    cache_manager.set(cache_key, embedding)
+                    cached_embeddings[idx] = embedding
+            except Exception as e:
+                logger.error(f"Error generating batch embeddings: {e}")
+                # Use zero vectors for failed embeddings
+                for idx in indices_to_generate:
+                    cached_embeddings[idx] = np.zeros(self.vector_dimension)
+        elif indices_to_generate:
+            # If we couldn't fit the model but have indices to generate
+            for idx in indices_to_generate:
+                cached_embeddings[idx] = np.zeros(self.vector_dimension)
+        
+        # Reconstruct the ordered list of embeddings
+        embeddings = [cached_embeddings[i] for i in range(len(texts))]
+        return embeddings
+    
+    def embed_chunks(self, chunks):
+        """
+        Generate embeddings for document chunks.
+        
+        Args:
+            chunks: List of document chunks
+            
+        Returns:
+            List of chunks with added embeddings
+        """
+        if not chunks:
+            return []
+        
+        # Extract text from chunks
+        texts = [chunk['text'] for chunk in chunks]
+        
+        # Generate embeddings
+        embeddings = self.get_embeddings(texts)
+        
+        # Add embeddings to chunks
+        embedded_chunks = []
+        for chunk, embedding in zip(chunks, embeddings):
+            chunk_with_embedding = chunk.copy()
+            chunk_with_embedding['embedding'] = embedding
+            embedded_chunks.append(chunk_with_embedding)
+        
+        logger.info(f"Generated embeddings for {len(chunks)} chunks")
+        return embedded_chunks
+    
+    def save_model(self, filepath):
+        """
+        Save the embedding model to a file.
+        
+        Args:
+            filepath: Output file path
+        """
+        try:
+            model_data = {
+                'tfidf_vectorizer': self.tfidf_vectorizer,
+                'svd_transformer': self.svd_transformer,
+                'vector_dimension': self.vector_dimension,
+                'actual_dimension': self.actual_dimension,
+                'is_fitted': self.is_fitted
+            }
+            
+            os.makedirs(os.path.dirname(filepath), exist_ok=True)
+            with open(filepath, 'wb') as f:
+                pickle.dump(model_data, f)
+            
+            logger.info(f"Saved embedding model to {filepath}")
+            return True
+        except Exception as e:
+            logger.error(f"Error saving embedding model: {e}")
+            return False
+    
+    def load_model(self, filepath):
+        """
+        Load the embedding model from a file.
+        
+        Args:
+            filepath: Input file path
+            
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        try:
+            with open(filepath, 'rb') as f:
+                model_data = pickle.load(f)
+            
+            self.tfidf_vectorizer = model_data['tfidf_vectorizer']
+            self.svd_transformer = model_data.get('svd_transformer')
+            self.vector_dimension = model_data['vector_dimension']
+            self.actual_dimension = model_data.get('actual_dimension', self.vector_dimension)
+            self.is_fitted = model_data['is_fitted']
+            
+            logger.info(f"Loaded embedding model from {filepath}")
+            return True
+        except Exception as e:
+            logger.error(f"Error loading embedding model: {e}")
+            return False
+    
+    def get_query_embedding(self, query):
+        """
+        Generate embedding for a query.
+        
+        Args:
+            query: Query text
+            
+        Returns:
+            numpy.ndarray: Query embedding vector
+        """
+        return self.get_embedding(query)
+
+# Global embedding manager instance
+embedding_manager = EmbeddingManager()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+"""
+Embedding utilities for Enterprise RAG System without external dependencies.
+"""
+import os
+import pickle
+import numpy as np
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.decomposition import TruncatedSVD
+import nltk
+from nltk.tokenize import word_tokenize
+import hashlib
+
+import config
+from utils.logger import get_logger
+from utils.cache import cache_manager
+
+# Ensure NLTK resources are downloaded locally if available
+try:
+    nltk.download('punkt', quiet=True)
+    nltk.download('stopwords', quiet=True)
+except Exception as e:
+    # If download fails, continue - we'll use simple tokenization
+    pass
+
+logger = get_logger(__name__)
+
+class EmbeddingManager:
+    """
+    Handles text embedding generation without external model dependencies.
+    Uses TF-IDF and SVD for creating vector representations.
+    """
+    
+    def __init__(self, vector_dimension=None):
+        """
+        Initialize the embedding manager.
+        
+        Args:
+            vector_dimension: Dimension for embedding vectors
+        """
+        self.vector_dimension = vector_dimension or config.VECTOR_DIMENSION
+        self.tfidf_vectorizer = None
+        self.svd_transformer = None
+        self.is_fitted = False
         
         # Initialize the vectorizer and transformer
         self._initialize_model()
