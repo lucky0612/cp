@@ -5890,3 +5890,881 @@ input:checked + .slider:before {
         max-width: 90%;
     }
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+/**
+ * Main JavaScript file for the Enterprise RAG System
+ */
+
+// Add current year to footer
+document.addEventListener('DOMContentLoaded', function() {
+    const currentYear = new Date().getFullYear();
+    
+    // Find all elements that need the current year
+    document.querySelectorAll('.current-year').forEach(function(element) {
+        element.textContent = currentYear;
+    });
+
+    // Set current year in context for templates
+    window.now = {
+        year: currentYear
+    };
+});
+
+// Utility functions for API calls
+const api = {
+    /**
+     * Make a GET request to the API
+     * @param {string} url - The URL to fetch
+     * @returns {Promise} - Promise with the response data
+     */
+    get: async function(url) {
+        try {
+            const response = await fetch(url, {
+                method: 'GET',
+                headers: {
+                    'Content-Type': 'application/json'
+                }
+            });
+            
+            if (!response.ok) {
+                throw new Error(`API error: ${response.status}`);
+            }
+            
+            return await response.json();
+        } catch (error) {
+            console.error('API request failed:', error);
+            throw error;
+        }
+    },
+    
+    /**
+     * Make a POST request to the API
+     * @param {string} url - The URL to fetch
+     * @param {Object} data - The data to send
+     * @returns {Promise} - Promise with the response data
+     */
+    post: async function(url, data) {
+        try {
+            const response = await fetch(url, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(data)
+            });
+            
+            if (!response.ok) {
+                throw new Error(`API error: ${response.status}`);
+            }
+            
+            return await response.json();
+        } catch (error) {
+            console.error('API request failed:', error);
+            throw error;
+        }
+    }
+};
+
+// Show a notification (toast)
+function showNotification(message, type = 'info') {
+    // Create notification element
+    const notification = document.createElement('div');
+    notification.className = `notification ${type}`;
+    notification.innerText = message;
+    
+    // Add to body
+    document.body.appendChild(notification);
+    
+    // Show notification
+    setTimeout(() => {
+        notification.classList.add('show');
+    }, 10);
+    
+    // Hide and remove after 5 seconds
+    setTimeout(() => {
+        notification.classList.remove('show');
+        setTimeout(() => {
+            document.body.removeChild(notification);
+        }, 300);
+    }, 5000);
+}
+
+// Format date
+function formatDate(dateString) {
+    if (!dateString) return '-';
+    
+    const date = new Date(dateString);
+    return date.toLocaleString();
+}
+
+// Escape HTML to prevent XSS
+function escapeHtml(unsafe) {
+    return unsafe
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+/**
+ * JavaScript for the Chat interface
+ */
+
+document.addEventListener('DOMContentLoaded', function() {
+    // Chat elements
+    const chatForm = document.getElementById('chat-form');
+    const userInput = document.getElementById('user-input');
+    const chatMessages = document.getElementById('chat-messages');
+    const streamToggle = document.getElementById('stream');
+    const temperatureSlider = document.getElementById('temperature');
+    const temperatureValue = document.getElementById('temperature-value');
+    const topKSlider = document.getElementById('top-k');
+    const topKValue = document.getElementById('top-k-value');
+    const sourceCheckboxes = document.querySelectorAll('input[name="source"]');
+    
+    // Conversation history
+    let conversation = [];
+    
+    // Update slider values on change
+    temperatureSlider.addEventListener('input', function() {
+        temperatureValue.textContent = this.value;
+    });
+    
+    topKSlider.addEventListener('input', function() {
+        topKValue.textContent = this.value;
+    });
+    
+    // Handle form submission
+    chatForm.addEventListener('submit', function(event) {
+        event.preventDefault();
+        
+        const query = userInput.value.trim();
+        if (!query) return;
+        
+        // Add user message to chat
+        addMessage(query, 'user');
+        
+        // Clear input
+        userInput.value = '';
+        
+        // Get selected data sources
+        const sources = Array.from(sourceCheckboxes)
+            .filter(checkbox => checkbox.checked)
+            .map(checkbox => checkbox.value);
+        
+        // Get other settings
+        const useStream = streamToggle.checked;
+        const temperature = parseFloat(temperatureSlider.value);
+        const topK = parseInt(topKSlider.value);
+        
+        // Add to conversation history
+        conversation.push({
+            role: 'user',
+            content: query
+        });
+        
+        // Show typing indicator
+        const typingIndicator = document.createElement('div');
+        typingIndicator.className = 'typing-indicator';
+        typingIndicator.innerHTML = `
+            <div class="typing-dot"></div>
+            <div class="typing-dot"></div>
+            <div class="typing-dot"></div>
+        `;
+        chatMessages.appendChild(typingIndicator);
+        
+        // Scroll to bottom
+        chatMessages.scrollTop = chatMessages.scrollHeight;
+        
+        // If streaming is enabled
+        if (useStream) {
+            fetchStreamingResponse(query, sources, temperature, topK, typingIndicator);
+        } else {
+            fetchFullResponse(query, sources, temperature, topK, typingIndicator);
+        }
+    });
+    
+    /**
+     * Add a message to the chat
+     * @param {string} content - Message content
+     * @param {string} sender - Message sender (user, assistant, system)
+     * @param {Array} sources - Optional sources for assistant messages
+     */
+    function addMessage(content, sender, sources = []) {
+        // Create message element
+        const messageElement = document.createElement('div');
+        messageElement.className = `message ${sender}`;
+        
+        // Create message content
+        const messageContent = document.createElement('div');
+        messageContent.className = 'message-content';
+        
+        // Process message content (handle markdown, code blocks, etc.)
+        messageContent.innerHTML = processMessageContent(content);
+        
+        // Add message content to message
+        messageElement.appendChild(messageContent);
+        
+        // Add sources if available (for assistant messages)
+        if (sender === 'assistant' && sources && sources.length > 0) {
+            const sourcesContainer = document.createElement('div');
+            sourcesContainer.className = 'message-sources';
+            
+            const sourcesTitle = document.createElement('div');
+            sourcesTitle.className = 'sources-title';
+            sourcesTitle.textContent = 'Sources:';
+            sourcesContainer.appendChild(sourcesTitle);
+            
+            sources.forEach(source => {
+                const sourceElement = document.createElement('span');
+                sourceElement.className = `message-source ${source.type}`;
+                sourceElement.textContent = `${source.title || source.id}`;
+                if (source.url) {
+                    sourceElement.dataset.url = source.url;
+                    sourceElement.addEventListener('click', () => {
+                        window.open(source.url, '_blank');
+                    });
+                }
+                sourcesContainer.appendChild(sourceElement);
+            });
+            
+            messageElement.appendChild(sourcesContainer);
+        }
+        
+        // Add message to chat
+        chatMessages.appendChild(messageElement);
+        
+        // Scroll to bottom
+        chatMessages.scrollTop = chatMessages.scrollHeight;
+        
+        // Add to conversation history if it's a user or assistant message
+        if (sender === 'user' || sender === 'assistant') {
+            conversation.push({
+                role: sender,
+                content: content
+            });
+        }
+    }
+    
+    /**
+     * Process message content to handle markdown, code blocks, etc.
+     * @param {string} content - Message content
+     * @returns {string} - Processed HTML content
+     */
+    function processMessageContent(content) {
+        if (!content) return '';
+        
+        // Escape HTML
+        content = escapeHtml(content);
+        
+        // Handle paragraphs
+        content = content.replace(/\n\n/g, '</p><p>');
+        
+        // Handle code blocks
+        content = content.replace(/```([a-z]*)\n([\s\S]*?)```/g, function(match, language, code) {
+            return `<pre><code class="language-${language}">${code}</code></pre>`;
+        });
+        
+        // Handle inline code
+        content = content.replace(/`([^`]+)`/g, '<code>$1</code>');
+        
+        // Handle bold
+        content = content.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+        
+        // Handle italics
+        content = content.replace(/\*([^*]+)\*/g, '<em>$1</em>');
+        
+        // Wrap in paragraph if needed
+        if (!content.startsWith('<p>')) {
+            content = `<p>${content}</p>`;
+        }
+        
+        return content;
+    }
+    
+    /**
+     * Fetch a streaming response from the API
+     * @param {string} query - User query
+     * @param {Array} sources - Selected data sources
+     * @param {number} temperature - Temperature parameter
+     * @param {number} topK - Top-k parameter
+     * @param {Element} typingIndicator - Typing indicator element
+     */
+    function fetchStreamingResponse(query, sources, temperature, topK, typingIndicator) {
+        // Create EventSource for SSE
+        const eventSource = new EventSource(`/api/chat?stream=true&query=${encodeURIComponent(query)}`);
+        
+        // Create message element for streaming response
+        const messageElement = document.createElement('div');
+        messageElement.className = 'message assistant';
+        
+        const messageContent = document.createElement('div');
+        messageContent.className = 'message-content';
+        messageContent.innerHTML = '<p></p>';
+        
+        messageElement.appendChild(messageContent);
+        
+        // Variables to track streaming state
+        let responseText = '';
+        let activeTag = 'p'; // Current active HTML tag
+        
+        // Handle incoming messages
+        eventSource.onmessage = function(event) {
+            try {
+                // Remove typing indicator
+                if (typingIndicator && typingIndicator.parentNode) {
+                    typingIndicator.parentNode.removeChild(typingIndicator);
+                }
+                
+                // Parse data
+                const data = JSON.parse(event.data);
+                
+                if (data.text) {
+                    // Add to chat if not already added
+                    if (!messageElement.parentNode) {
+                        chatMessages.appendChild(messageElement);
+                    }
+                    
+                    // Add text to response
+                    responseText += data.text;
+                    
+                    // Process content for display
+                    const processedContent = processMessageContent(responseText);
+                    messageContent.innerHTML = processedContent;
+                    
+                    // Scroll to bottom
+                    chatMessages.scrollTop = chatMessages.scrollHeight;
+                }
+            } catch (error) {
+                console.error('Error processing streaming response:', error);
+            }
+        };
+        
+        // Handle stream end
+        eventSource.addEventListener('end', function() {
+            eventSource.close();
+            
+            // Add to conversation history
+            conversation.push({
+                role: 'assistant',
+                content: responseText
+            });
+        });
+        
+        // Handle errors
+        eventSource.onerror = function(error) {
+            console.error('EventSource error:', error);
+            eventSource.close();
+            
+            // Remove typing indicator
+            if (typingIndicator && typingIndicator.parentNode) {
+                typingIndicator.parentNode.removeChild(typingIndicator);
+            }
+            
+            // Show error message
+            addMessage('Sorry, an error occurred while generating the response. Please try again.', 'system');
+        };
+    }
+    
+    /**
+     * Fetch a full response from the API
+     * @param {string} query - User query
+     * @param {Array} sources - Selected data sources
+     * @param {number} temperature - Temperature parameter
+     * @param {number} topK - Top-k parameter
+     * @param {Element} typingIndicator - Typing indicator element
+     */
+    function fetchFullResponse(query, sources, temperature, topK, typingIndicator) {
+        // Prepare request data
+        const requestData = {
+            query,
+            sources,
+            conversation,
+            temperature,
+            top_k: topK,
+            stream: false
+        };
+        
+        // Call API
+        api.post('/api/chat', requestData)
+            .then(data => {
+                // Remove typing indicator
+                if (typingIndicator && typingIndicator.parentNode) {
+                    typingIndicator.parentNode.removeChild(typingIndicator);
+                }
+                
+                if (data.success && data.response) {
+                    // Add assistant message to chat
+                    addMessage(data.response, 'assistant');
+                } else {
+                    throw new Error(data.error || 'Unknown error');
+                }
+            })
+            .catch(error => {
+                console.error('Error fetching response:', error);
+                
+                // Remove typing indicator
+                if (typingIndicator && typingIndicator.parentNode) {
+                    typingIndicator.parentNode.removeChild(typingIndicator);
+                }
+                
+                // Show error message
+                addMessage('Sorry, an error occurred while generating the response. Please try again.', 'system');
+            });
+    }
+});
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+/**
+ * JavaScript for the Admin Dashboard
+ */
+
+document.addEventListener('DOMContentLoaded', function() {
+    // Status indicators
+    const confluenceStatus = document.getElementById('confluence-status');
+    const jiraStatus = document.getElementById('jira-status');
+    const remedyStatus = document.getElementById('remedy-status');
+    
+    // Form inputs
+    const confluenceSpace = document.getElementById('confluence-space');
+    const confluenceLimit = document.getElementById('confluence-limit');
+    const jiraProject = document.getElementById('jira-project');
+    const jiraType = document.getElementById('jira-type');
+    const jiraLimit = document.getElementById('jira-limit');
+    const remedyStatusFilter = document.getElementById('remedy-status-filter');
+    const remedyLimit = document.getElementById('remedy-limit');
+    
+    // Buttons
+    const testConfluenceButton = document.getElementById('test-confluence');
+    const indexConfluenceButton = document.getElementById('index-confluence');
+    const testJiraButton = document.getElementById('test-jira');
+    const indexJiraButton = document.getElementById('index-jira');
+    const testRemedyButton = document.getElementById('test-remedy');
+    const indexRemedyButton = document.getElementById('index-remedy');
+    
+    // Status table
+    const indexingStatusTable = document.getElementById('indexing-status-table');
+    
+    // Current indexing status (to be updated from server)
+    let indexingStatus = {
+        confluence: { status: 'Not Indexed', documents: 0, lastUpdated: null },
+        jira: { status: 'Not Indexed', documents: 0, lastUpdated: null },
+        remedy: { status: 'Not Indexed', documents: 0, lastUpdated: null }
+    };
+    
+    // Initialize the page
+    initPage();
+    
+    /**
+     * Initialize the admin page
+     */
+    function initPage() {
+        // Add event listeners for buttons
+        testConfluenceButton.addEventListener('click', testConfluenceConnection);
+        indexConfluenceButton.addEventListener('click', indexConfluenceContent);
+        testJiraButton.addEventListener('click', testJiraConnection);
+        indexJiraButton.addEventListener('click', indexJiraContent);
+        testRemedyButton.addEventListener('click', testRemedyConnection);
+        indexRemedyButton.addEventListener('click', indexRemedyContent);
+        
+        // Load initial status
+        loadIndexingStatus();
+    }
+    
+    /**
+     * Load indexing status from server
+     */
+    async function loadIndexingStatus() {
+        try {
+            // This would normally fetch from the server, but we'll use dummy data for now
+            // const response = await api.get('/api/status');
+            
+            // Update status table
+            updateStatusTable();
+        } catch (error) {
+            console.error('Error loading indexing status:', error);
+            showNotification('Failed to load indexing status.', 'error');
+        }
+    }
+    
+    /**
+     * Update the status table with current indexing status
+     */
+    function updateStatusTable() {
+        // Clear table
+        indexingStatusTable.innerHTML = '';
+        
+        // Add rows for each source
+        Object.entries(indexingStatus).forEach(([source, status]) => {
+            const row = document.createElement('tr');
+            
+            // Source column
+            const sourceCell = document.createElement('td');
+            sourceCell.textContent = source.charAt(0).toUpperCase() + source.slice(1);
+            row.appendChild(sourceCell);
+            
+            // Status column
+            const statusCell = document.createElement('td');
+            statusCell.textContent = status.status;
+            if (status.status === 'Indexed') {
+                statusCell.classList.add('status-success');
+            } else if (status.status === 'Error') {
+                statusCell.classList.add('status-error');
+            }
+            row.appendChild(statusCell);
+            
+            // Documents column
+            const documentsCell = document.createElement('td');
+            documentsCell.textContent = status.documents;
+            row.appendChild(documentsCell);
+            
+            // Last updated column
+            const lastUpdatedCell = document.createElement('td');
+            lastUpdatedCell.textContent = status.lastUpdated ? formatDate(status.lastUpdated) : '-';
+            row.appendChild(lastUpdatedCell);
+            
+            // Add row to table
+            indexingStatusTable.appendChild(row);
+        });
+    }
+    
+    /**
+     * Update status indicator
+     * @param {Element} element - Status indicator element
+     * @param {string} status - Status value ('connected', 'error', 'unknown')
+     * @param {string} text - Status text
+     */
+    function updateStatusIndicator(element, status, text) {
+        element.textContent = text;
+        element.className = 'status-indicator';
+        element.classList.add(status);
+    }
+    
+    /**
+     * Test Confluence connection
+     */
+    async function testConfluenceConnection() {
+        // Disable button during test
+        testConfluenceButton.disabled = true;
+        
+        try {
+            // Call API to test connection
+            const response = await api.get('/api/confluence/test');
+            
+            if (response.success) {
+                updateStatusIndicator(confluenceStatus, 'connected', 'Connected');
+                showNotification('Successfully connected to Confluence.', 'success');
+            } else {
+                updateStatusIndicator(confluenceStatus, 'error', 'Connection Failed');
+                showNotification('Failed to connect to Confluence.', 'error');
+            }
+        } catch (error) {
+            console.error('Error testing Confluence connection:', error);
+            updateStatusIndicator(confluenceStatus, 'error', 'Connection Failed');
+            showNotification('Error testing Confluence connection.', 'error');
+        } finally {
+            // Re-enable button
+            testConfluenceButton.disabled = false;
+        }
+    }
+    
+    /**
+     * Index Confluence content
+     */
+    async function indexConfluenceContent() {
+        // Disable button during indexing
+        indexConfluenceButton.disabled = true;
+        
+        // Get input values
+        const spaceKey = confluenceSpace.value.trim();
+        const limit = parseInt(confluenceLimit.value);
+        
+        try {
+            // Call API to index content
+            const response = await api.post('/api/index/confluence', {
+                space_key: spaceKey || null,
+                limit: limit
+            });
+            
+            if (response.success) {
+                // Update status
+                indexingStatus.confluence = {
+                    status: 'Indexed',
+                    documents: response.indexed_count,
+                    lastUpdated: new Date().toISOString()
+                };
+                
+                // Update status table
+                updateStatusTable();
+                
+                showNotification(`Successfully indexed ${response.indexed_count} Confluence documents.`, 'success');
+            } else {
+                showNotification('Failed to index Confluence content.', 'error');
+            }
+        } catch (error) {
+            console.error('Error indexing Confluence content:', error);
+            showNotification('Error indexing Confluence content.', 'error');
+            
+            // Update status
+            indexingStatus.confluence = {
+                status: 'Error',
+                documents: indexingStatus.confluence.documents,
+                lastUpdated: new Date().toISOString()
+            };
+            
+            // Update status table
+            updateStatusTable();
+        } finally {
+            // Re-enable button
+            indexConfluenceButton.disabled = false;
+        }
+    }
+    
+    /**
+     * Test JIRA connection
+     */
+    async function testJiraConnection() {
+        // Disable button during test
+        testJiraButton.disabled = true;
+        
+        try {
+            // Call API to test connection
+            const response = await api.get('/api/jira/test');
+            
+            if (response.success) {
+                updateStatusIndicator(jiraStatus, 'connected', 'Connected');
+                showNotification('Successfully connected to JIRA.', 'success');
+            } else {
+                updateStatusIndicator(jiraStatus, 'error', 'Connection Failed');
+                showNotification('Failed to connect to JIRA.', 'error');
+            }
+        } catch (error) {
+            console.error('Error testing JIRA connection:', error);
+            updateStatusIndicator(jiraStatus, 'error', 'Connection Failed');
+            showNotification('Error testing JIRA connection.', 'error');
+        } finally {
+            // Re-enable button
+            testJiraButton.disabled = false;
+        }
+    }
+    
+    /**
+     * Index JIRA content
+     */
+    async function indexJiraContent() {
+        // Disable button during indexing
+        indexJiraButton.disabled = true;
+        
+        // Get input values
+        const projectKey = jiraProject.value.trim();
+        const issueType = jiraType.value.trim();
+        const limit = parseInt(jiraLimit.value);
+        
+        try {
+            // Call API to index content
+            const response = await api.post('/api/index/jira', {
+                project_key: projectKey || null,
+                issue_type: issueType || null,
+                limit: limit
+            });
+            
+            if (response.success) {
+                // Update status
+                indexingStatus.jira = {
+                    status: 'Indexed',
+                    documents: response.indexed_count,
+                    lastUpdated: new Date().toISOString()
+                };
+                
+                // Update status table
+                updateStatusTable();
+                
+                showNotification(`Successfully indexed ${response.indexed_count} JIRA documents.`, 'success');
+            } else {
+                showNotification('Failed to index JIRA content.', 'error');
+            }
+        } catch (error) {
+            console.error('Error indexing JIRA content:', error);
+            showNotification('Error indexing JIRA content.', 'error');
+            
+            // Update status
+            indexingStatus.jira = {
+                status: 'Error',
+                documents: indexingStatus.jira.documents,
+                lastUpdated: new Date().toISOString()
+            };
+            
+            // Update status table
+            updateStatusTable();
+        } finally {
+            // Re-enable button
+            indexJiraButton.disabled = false;
+        }
+    }
+    
+    /**
+     * Test Remedy connection
+     */
+    async function testRemedyConnection() {
+        // Disable button during test
+        testRemedyButton.disabled = true;
+        
+        try {
+            // Call API to test connection
+            const response = await api.get('/api/remedy/test');
+            
+            if (response.success) {
+                updateStatusIndicator(remedyStatus, 'connected', 'Connected');
+                showNotification('Successfully connected to Remedy.', 'success');
+            } else {
+                updateStatusIndicator(remedyStatus, 'error', 'Connection Failed');
+                showNotification('Failed to connect to Remedy.', 'error');
+            }
+        } catch (error) {
+            console.error('Error testing Remedy connection:', error);
+            updateStatusIndicator(remedyStatus, 'error', 'Connection Failed');
+            showNotification('Error testing Remedy connection.', 'error');
+        } finally {
+            // Re-enable button
+            testRemedyButton.disabled = false;
+        }
+    }
+    
+    /**
+     * Index Remedy content
+     */
+    async function indexRemedyContent() {
+        // Disable button during indexing
+        indexRemedyButton.disabled = true;
+        
+        // Get input values
+        const status = remedyStatusFilter.value;
+        const limit = parseInt(remedyLimit.value);
+        
+        try {
+            // Call API to index content
+            const response = await api.post('/api/index/remedy', {
+                status: status || null,
+                limit: limit
+            });
+            
+            if (response.success) {
+                // Update status
+                indexingStatus.remedy = {
+                    status: 'Indexed',
+                    documents: response.indexed_count,
+                    lastUpdated: new Date().toISOString()
+                };
+                
+                // Update status table
+                updateStatusTable();
+                
+                showNotification(`Successfully indexed ${response.indexed_count} Remedy documents.`, 'success');
+            } else {
+                showNotification('Failed to index Remedy content.', 'error');
+            }
+        } catch (error) {
+            console.error('Error indexing Remedy content:', error);
+            showNotification('Error indexing Remedy content.', 'error');
+            
+            // Update status
+            indexingStatus.remedy = {
+                status: 'Error',
+                documents: indexingStatus.remedy.documents,
+                lastUpdated: new Date().toISOString()
+            };
+            
+            // Update status table
+            updateStatusTable();
+        } finally {
+            // Re-enable button
+            indexRemedyButton.disabled = false;
+        }
+    }
+});
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
