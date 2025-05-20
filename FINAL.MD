@@ -1,663 +1,589 @@
 #!/usr/bin/env python3
-import os
-import json
-import pickle
-import time
-import re
-import logging
 import requests
-from requests.auth import HTTPBasicAuth
-import base64
-from datetime import datetime, timedelta
+import logging
+import os
+import sys
+import json
+import re
+import time
+from datetime import datetime
+from urllib.parse import quote
 import vertexai
 from vertexai.generative_models import GenerationConfig, GenerativeModel
 from google.api_core.exceptions import GoogleAPICallError
-import concurrent.futures
-import urllib3
-
-# Disable SSL warnings
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler("jira_chatbot.log"),
-        logging.StreamHandler()
+        logging.FileHandler("confluence_gemini.log"),
+        logging.StreamHandler(sys.stdout)
     ]
 )
-logger = logging.getLogger("JiraChatbot")
+logger = logging.getLogger("ConfluenceGemini")
 
-# Configuration (Environment Variables or Config File)
+# Configuration
 PROJECT_ID = os.environ.get("PROJECT_ID", "prj-dv-cws-4363")
 REGION = os.environ.get("REGION", "us-central1")
 MODEL_NAME = os.environ.get("MODEL_NAME", "gemini-2.0-flash-001")
+MAX_RESULTS = int(os.environ.get("MAX_RESULTS", "25"))
 
-# Jira Configuration
-JIRA_URL = os.environ.get("JIRA_URL", "https://cmegroup.atlassian.net/")
-JIRA_EMAIL = os.environ.get("JIRA_EMAIL", "your.email@cmegroup.com")
-JIRA_API_TOKEN = os.environ.get("JIRA_API_TOKEN", "your-api-token")
+class HTMLFilter:
+    """Simple HTML to text converter using regex."""
+    @staticmethod
+    def clean_html(html_text):
+        """Remove HTML tags and normalize whitespace."""
+        if not html_text:
+            return ""
+        # Remove HTML tags
+        text = re.sub(r'<[^>]*>', ' ', html_text)
+        # Replace multiple whitespace with single space
+        text = re.sub(r'\s+', ' ', text).strip()
+        # Handle common HTML entities
+        text = text.replace('&nbsp;', ' ').replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>')
+        return text
 
-# Cache configuration
-CACHE_DIR = "jira_cache"
-CACHE_EXPIRY = 24  # Cache expiry in hours
-
-class JiraCache:
-    """Class to handle caching of Jira data"""
+class ConfluenceClient:
+    """Client for Confluence REST API operations."""
     
-    def __init__(self, cache_dir=CACHE_DIR, expiry_hours=CACHE_EXPIRY):
-        self.cache_dir = cache_dir
-        self.expiry_hours = expiry_hours
-        os.makedirs(cache_dir, exist_ok=True)
-    
-    def _get_cache_path(self, key):
-        """Get the file path for a cache key"""
-        # Create a safe filename from the cache key
-        safe_key = re.sub(r'[^\w]', '_', key)
-        return os.path.join(self.cache_dir, f"{safe_key}.pkl")
-    
-    def get(self, key):
-        """Get data from cache if it exists and is not expired"""
-        cache_path = self._get_cache_path(key)
-        
-        if not os.path.exists(cache_path):
-            return None
-        
-        try:
-            with open(cache_path, 'rb') as f:
-                cache_data = pickle.load(f)
-            
-            # Check if cache is expired
-            cache_time = cache_data.get('timestamp')
-            if cache_time and datetime.now() - cache_time > timedelta(hours=self.expiry_hours):
-                logger.info(f"Cache expired for key: {key}")
-                return None
-            
-            logger.info(f"Cache hit for key: {key}")
-            return cache_data.get('data')
-        except Exception as e:
-            logger.error(f"Error reading cache: {e}")
-            return None
-    
-    def set(self, key, data):
-        """Save data to cache with current timestamp"""
-        cache_path = self._get_cache_path(key)
-        
-        try:
-            cache_data = {
-                'data': data,
-                'timestamp': datetime.now()
-            }
-            with open(cache_path, 'wb') as f:
-                pickle.dump(cache_data, f)
-            logger.info(f"Cache set for key: {key}")
-            return True
-        except Exception as e:
-            logger.error(f"Error writing cache: {e}")
-            return False
-    
-    def clear(self, key=None):
-        """Clear specific cache or all cache if key is None"""
-        if key:
-            cache_path = self._get_cache_path(key)
-            if os.path.exists(cache_path):
-                os.remove(cache_path)
-                logger.info(f"Cleared cache for key: {key}")
-        else:
-            import shutil
-            shutil.rmtree(self.cache_dir)
-            os.makedirs(self.cache_dir, exist_ok=True)
-            logger.info("Cleared all cache data")
-
-
-class JiraClient:
-    """Class to handle interactions with Jira API"""
-    
-    def __init__(self, base_url=JIRA_URL, email=JIRA_EMAIL, api_token=JIRA_API_TOKEN):
-        self.base_url = base_url.rstrip('/')
-        self.auth = HTTPBasicAuth(email, api_token)
-        self.headers = {
-            "Accept": "application/json",
-            "Content-Type": "application/json"
-        }
-        self.cache = JiraCache()
-    
-    def make_request(self, method, endpoint, params=None, data=None, cache_key=None, force_refresh=False):
-        """Make an HTTP request to Jira API with caching support"""
-        url = f"{self.base_url}{endpoint}"
-        
-        # Check cache if applicable
-        if method.lower() == 'get' and cache_key and not force_refresh:
-            cached_data = self.cache.get(cache_key)
-            if cached_data:
-                return cached_data
-        
-        try:
-            response = requests.request(
-                method,
-                url,
-                headers=self.headers,
-                params=params,
-                json=data,
-                auth=self.auth,
-                verify=False  # Disable SSL verification as requested
-            )
-            
-            # Handle HTTP errors
-            response.raise_for_status()
-            
-            if response.status_code == 204:  # No content
-                result = {"status": "success"}
-            else:
-                result = response.json()
-            
-            # Cache the result if applicable
-            if method.lower() == 'get' and cache_key:
-                self.cache.set(cache_key, result)
-            
-            return result
-        except requests.exceptions.RequestException as e:
-            logger.error(f"API request error: {e}")
-            return {"error": str(e)}
-    
-    def get_myself(self, force_refresh=False):
-        """Get information about the authenticated user"""
-        return self.make_request('GET', '/rest/api/3/myself', cache_key='myself', force_refresh=force_refresh)
-    
-    def search_issues(self, jql, fields=None, max_results=50, force_refresh=False):
-        """Search for issues using JQL"""
-        if fields is None:
-            fields = ["summary", "description", "status", "assignee", "reporter", "created", "updated", "priority", "issuetype", "labels", "comment"]
-        
-        params = {
-            "jql": jql,
-            "maxResults": max_results,
-            "fields": ",".join(fields),
-            "expand": "renderedFields,names,schema,transitions,operations,editmeta,changelog"
-        }
-        
-        cache_key = f"search_issues_{jql}_{max_results}"
-        return self.make_request('GET', '/rest/api/3/search', params=params, cache_key=cache_key, force_refresh=force_refresh)
-    
-    def get_issue(self, issue_key, fields=None, expand=None, force_refresh=False):
-        """Get detailed information about a specific issue"""
-        params = {}
-        if fields:
-            params["fields"] = ",".join(fields)
-        if expand:
-            params["expand"] = expand
-        
-        cache_key = f"issue_{issue_key}"
-        return self.make_request('GET', f'/rest/api/3/issue/{issue_key}', params=params, cache_key=cache_key, force_refresh=force_refresh)
-    
-    def get_issue_comments(self, issue_key, force_refresh=False):
-        """Get comments for a specific issue"""
-        cache_key = f"comments_{issue_key}"
-        return self.make_request('GET', f'/rest/api/3/issue/{issue_key}/comment', cache_key=cache_key, force_refresh=force_refresh)
-    
-    def get_issue_attachments(self, issue_key, force_refresh=False):
-        """Get attachments for a specific issue"""
-        cache_key = f"attachments_{issue_key}"
-        return self.make_request('GET', f'/rest/api/3/issue/{issue_key}/attachment', cache_key=cache_key, force_refresh=force_refresh)
-    
-    def get_projects(self, force_refresh=False):
-        """Get all accessible projects"""
-        cache_key = "projects"
-        return self.make_request('GET', '/rest/api/3/project', cache_key=cache_key, force_refresh=force_refresh)
-    
-    def get_project(self, project_key, force_refresh=False):
-        """Get detailed information about a specific project"""
-        cache_key = f"project_{project_key}"
-        return self.make_request('GET', f'/rest/api/3/project/{project_key}', cache_key=cache_key, force_refresh=force_refresh)
-    
-    def get_all_issue_types(self, force_refresh=False):
-        """Get all issue types"""
-        cache_key = "issue_types"
-        return self.make_request('GET', '/rest/api/3/issuetype', cache_key=cache_key, force_refresh=force_refresh)
-    
-    def get_all_fields(self, force_refresh=False):
-        """Get all available fields"""
-        cache_key = "fields"
-        return self.make_request('GET', '/rest/api/3/field', cache_key=cache_key, force_refresh=force_refresh)
-    
-    def download_attachment(self, attachment_url, filename=None, force_refresh=False):
-        """Download an attachment file"""
-        if not filename:
-            filename = attachment_url.split('/')[-1]
-        
-        cache_key = f"attachment_data_{filename}"
-        cached_data = None if force_refresh else self.cache.get(cache_key)
-        
-        if cached_data:
-            return cached_data
-        
-        try:
-            response = requests.get(
-                attachment_url,
-                auth=self.auth,
-                verify=False  # Disable SSL verification
-            )
-            response.raise_for_status()
-            
-            content_type = response.headers.get('Content-Type', '')
-            content = response.content
-            
-            if 'image' in content_type:
-                # For images, encode as base64 for sending to Gemini
-                encoded_data = base64.b64encode(content).decode('utf-8')
-                result = {
-                    'content_type': content_type,
-                    'filename': filename,
-                    'data': encoded_data,
-                    'is_image': True
-                }
-            else:
-                # For text-based files, try to decode
-                try:
-                    decoded_content = content.decode('utf-8')
-                    result = {
-                        'content_type': content_type,
-                        'filename': filename,
-                        'data': decoded_content,
-                        'is_image': False
-                    }
-                except UnicodeDecodeError:
-                    # Binary file, encode as base64
-                    encoded_data = base64.b64encode(content).decode('utf-8')
-                    result = {
-                        'content_type': content_type,
-                        'filename': filename,
-                        'data': encoded_data,
-                        'is_image': False,
-                        'is_binary': True
-                    }
-            
-            self.cache.set(cache_key, result)
-            return result
-        except Exception as e:
-            logger.error(f"Error downloading attachment: {e}")
-            return {"error": str(e)}
-    
-    def extract_tables_from_html(self, html_content):
-        """Extract table data from HTML content"""
-        # Simple regex-based table extraction
-        table_pattern = r'<table[^>]*>(.*?)</table>'
-        tables = re.findall(table_pattern, html_content, re.DOTALL)
-        
-        extracted_tables = []
-        for table_html in tables:
-            rows = []
-            row_pattern = r'<tr[^>]*>(.*?)</tr>'
-            for row_html in re.findall(row_pattern, table_html, re.DOTALL):
-                # Extract header cells
-                headers = re.findall(r'<th[^>]*>(.*?)</th>', row_html, re.DOTALL)
-                if headers:
-                    row = [re.sub(r'<[^>]+>', '', cell).strip() for cell in headers]
-                    rows.append(row)
-                
-                # Extract regular cells
-                cells = re.findall(r'<td[^>]*>(.*?)</td>', row_html, re.DOTALL)
-                if cells:
-                    row = [re.sub(r'<[^>]+>', '', cell).strip() for cell in cells]
-                    rows.append(row)
-            
-            if rows:
-                extracted_tables.append(rows)
-        
-        return extracted_tables
-
-
-class GeminiChat:
-    """Class for interacting with Gemini models via Vertex AI"""
-    
-    def __init__(self, project_id=PROJECT_ID, location=REGION, model_name=MODEL_NAME):
-        self.project_id = project_id
-        self.location = location
-        self.model_name = model_name
-        
-        # Initialize Vertex AI
-        vertexai.init(project=self.project_id, location=self.location)
-        self.model = GenerativeModel(self.model_name)
-        
-        # System prompt - comprehensive instructions for Gemini
-        self.system_prompt = """
-You are JiraGPT, an intelligent assistant designed to help answer questions about Jira projects, tickets, and tasks.
-
-Key capabilities:
-1. Provide clear, concise, and accurate answers about Jira tickets, projects, and workflows
-2. Format responses appropriately based on the query (tables, bullet points, paragraphs)
-3. Include relevant links to Jira pages when applicable
-4. Ask clarifying questions when needed to provide more accurate answers
-5. Understand both technical and non-technical questions
-6. Analyze tables and images from Jira tickets
-7. Be capable of explaining Jira concepts in simple terms
-8. Stay professional but friendly in your tone
-
-When you don't know the answer:
-- Clearly state that you don't have enough information
-- Ask specific questions to help narrow down what the user is looking for
-- Suggest alternative approaches or places to look for the information
-
-When providing links, always use the format [Title](URL) for better readability.
-
-When a user asks about specific tickets:
-- Summarize key information like status, assignee, priority, and description
-- Highlight recent updates or comments
-- Include a direct link to the ticket
-
-Always respond in a structured way that makes information easy to scan and understand.
-"""
-    
-    def generate_response(self, user_query, jira_context=None, image_data=None):
+    def __init__(self, base_url, username, api_token):
         """
-        Generate a response using Gemini based on the user query and Jira context
+        Initialize the Confluence client with authentication details.
         
         Args:
-            user_query (str): The user's question
-            jira_context (dict): Relevant Jira data to help answer the question
-            image_data (list): List of image data to include in the query
+            base_url: The base URL of the Confluence instance
+            username: The username for authentication
+            api_token: The API token for authentication
+        """
+        self.base_url = base_url.rstrip('/')
+        self.auth = (username, api_token)
+        self.headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        }
+        self.session = requests.Session()
+        logger.info(f"Initialized Confluence client for {self.base_url}")
+    
+    def test_connection(self):
+        """Test the connection to Confluence API."""
+        try:
+            logger.info("Testing connection to Confluence...")
+            response = self.session.get(
+                f"{self.base_url}/rest/api/content",
+                auth=self.auth,
+                headers=self.headers,
+                params={"limit": 1},
+                verify=False  # Setting SSL verify to False as requested
+            )
+            response.raise_for_status()
             
-        Returns:
-            str: The generated response
+            if response.ok:
+                logger.info("Connection successful!")
+                return True
+            return False
+        except Exception as e:
+            logger.error(f"Connection test failed: {str(e)}")
+            return False
+    
+    def get_content_by_id(self, content_id, expand=None):
+        """
+        Get content by ID with optional expansion parameters.
+        
+        Args:
+            content_id: The ID of the content to retrieve
+            expand: Comma-separated list of properties to expand
         """
         try:
-            # Prepare context for Gemini
-            context = f"{self.system_prompt}\n\n"
+            params = {}
+            if expand:
+                params["expand"] = expand
             
-            if jira_context:
-                context += "Here is relevant information from Jira to help answer the question:\n"
-                context += json.dumps(jira_context, indent=2)
-                context += "\n\n"
+            logger.info(f"Fetching content with ID: {content_id}")
+            response = self.session.get(
+                f"{self.base_url}/rest/api/content/{content_id}",
+                auth=self.auth,
+                headers=self.headers,
+                params=params,
+                verify=False
+            )
+            response.raise_for_status()
             
-            # Combine context and user query
-            full_prompt = f"{context}User question: {user_query}\n\nYour response:"
+            return response.json()
+        except Exception as e:
+            logger.error(f"Error retrieving content: {str(e)}")
+            return None
+    
+    def get_page_content(self, page_id):
+        """
+        Get the content of a page in a suitable format for NLP.
+        
+        Args:
+            page_id: The ID of the page
+        """
+        try:
+            page = self.get_content_by_id(page_id, expand="body.storage,metadata.labels")
+            if not page:
+                return None
+            
+            # Extract basic metadata
+            metadata = {
+                "id": page.get("id"),
+                "title": page.get("title"),
+                "type": page.get("type"),
+                "url": f"{self.base_url}/wiki/spaces/{page.get('_expandable', {}).get('space', '').split('/')[-1]}/pages/{page.get('id')}",
+                "labels": [label.get("name") for label in page.get("metadata", {}).get("labels", {}).get("results", [])]
+            }
+            
+            # Get raw content
+            content = page.get("body", {}).get("storage", {}).get("value", "")
+            
+            # Process HTML content to plain text
+            plain_text = HTMLFilter.clean_html(content)
+            
+            return {
+                "metadata": metadata,
+                "content": plain_text,
+                "raw_html": content
+            }
+        except Exception as e:
+            logger.error(f"Error processing page content: {str(e)}")
+            return None
+    
+    def search_content(self, query, content_type="page", limit=MAX_RESULTS):
+        """
+        Search for content using Confluence's built-in search.
+        
+        Args:
+            query: Search query
+            content_type: Type of content to search for
+            limit: Maximum number of results to return
+            
+        Returns:
+            List of search results
+        """
+        try:
+            # Create CQL query
+            cql = f'type={content_type} AND text ~ "{query}"'
+            
+            logger.info(f"Searching with CQL: {cql}")
+            response = self.session.get(
+                f"{self.base_url}/rest/api/content/search",
+                auth=self.auth,
+                headers=self.headers,
+                params={
+                    "cql": cql,
+                    "limit": limit
+                },
+                verify=False
+            )
+            response.raise_for_status()
+            
+            search_results = response.json()
+            logger.info(f"Search returned {len(search_results.get('results', []))} results")
+            
+            # Get full content for each result
+            detailed_results = []
+            for result in search_results.get("results", []):
+                content = self.get_page_content(result.get("id"))
+                if content:
+                    detailed_results.append(content)
+            
+            return detailed_results
+        except Exception as e:
+            logger.error(f"Error searching content: {str(e)}")
+            return []
+
+class TextProcessor:
+    """Class for simple text processing without external dependencies."""
+    
+    @staticmethod
+    def extract_keywords(text, top_n=5):
+        """
+        Extract potential keywords from text, using simple frequency analysis.
+        
+        Args:
+            text: Input text
+            top_n: Number of top keywords to return
+            
+        Returns:
+            List of keywords
+        """
+        if not text:
+            return []
+        
+        # Convert to lowercase
+        text = text.lower()
+        
+        # Remove punctuation and split into words
+        words = re.findall(r'\b[a-z]{3,}\b', text)
+        
+        # Remove common stop words (simplified list)
+        stop_words = {'the', 'a', 'an', 'and', 'or', 'but', 'is', 'are', 'was', 'were', 
+                     'be', 'been', 'being', 'in', 'on', 'at', 'to', 'for', 'with', 'by', 
+                     'about', 'like', 'through', 'over', 'before', 'after', 'between', 
+                     'under', 'above', 'of', 'from', 'up', 'down', 'this', 'that', 'these', 
+                     'those', 'it', 'its', 'he', 'she', 'we', 'they', 'them', 'their', 'has', 
+                     'have', 'had', 'do', 'does', 'did', 'can', 'could', 'will', 'would', 'should'}
+        
+        filtered_words = [word for word in words if word not in stop_words]
+        
+        # Count word frequencies
+        word_counts = {}
+        for word in filtered_words:
+            word_counts[word] = word_counts.get(word, 0) + 1
+        
+        # Sort by frequency
+        sorted_words = sorted(word_counts.items(), key=lambda x: x[1], reverse=True)
+        
+        # Return top N words
+        return [word for word, count in sorted_words[:top_n]]
+    
+    @staticmethod
+    def is_multi_part_question(question):
+        """
+        Detect if a question has multiple parts.
+        
+        Args:
+            question: The question text
+            
+        Returns:
+            Boolean indicating if it's a multi-part question
+        """
+        # Patterns that suggest multi-part questions
+        patterns = [
+            r'\d+\s*\.\s+',  # Numbered list (1. 2. etc)
+            r'first.*?second',
+            r'part\s+\d+',
+            r'multiple questions',
+            r'several questions',
+            r'and also',
+            r';',
+            r'\?.*?\?'  # Multiple question marks
+        ]
+        
+        return any(re.search(pattern, question, re.IGNORECASE) for pattern in patterns)
+    
+    @staticmethod
+    def split_multi_part_question(question):
+        """
+        Split a multi-part question into individual questions.
+        
+        Args:
+            question: Multi-part question
+            
+        Returns:
+            List of individual questions
+        """
+        # Split by question marks
+        parts = re.split(r'\?\s+', question)
+        
+        # Make sure each part ends with a question mark
+        for i, part in enumerate(parts):
+            if i < len(parts) - 1 and not part.endswith('?'):
+                parts[i] = part + '?'
+        
+        # Filter out empty parts
+        parts = [part.strip() for part in parts if part.strip()]
+        
+        # If no good splits, try other methods
+        if len(parts) <= 1:
+            # Try numbered patterns
+            numbered_parts = re.split(r'\d+\s*\.\s+', question)
+            numbered_parts = [part.strip() for part in numbered_parts if part.strip()]
+            
+            if len(numbered_parts) > 1:
+                parts = numbered_parts
+        
+        # If still no success, try other delimiters
+        if len(parts) <= 1:
+            for delimiter in [';', 'and also,', 'additionally,', 'moreover,', 'furthermore,']:
+                if delimiter in question.lower():
+                    parts = question.split(delimiter)
+                    parts = [part.strip() for part in parts if part.strip()]
+                    break
+        
+        # Default to the original question if all else fails
+        if len(parts) <= 1:
+            return [question]
+        
+        return parts
+
+class GeminiClient:
+    """Wrapper for interacting with Google's Gemini API."""
+    
+    def __init__(self):
+        """Initialize the Gemini client."""
+        vertexai.init(project=PROJECT_ID, location=REGION)
+        self.model = GenerativeModel(MODEL_NAME)
+        logger.info(f"Initialized Gemini client with model {MODEL_NAME}")
+    
+    def generate_response(self, prompt, system_prompt=None, temperature=0.7, max_tokens=8192):
+        """
+        Generate a response from Gemini.
+        
+        Args:
+            prompt: User prompt
+            system_prompt: System instructions
+            temperature: Sampling temperature (0.0 to 1.0)
+            max_tokens: Maximum tokens to generate
+            
+        Returns:
+            Generated response text
+        """
+        try:
+            logger.info(f"Generating response with temperature {temperature}")
             
             # Configure generation parameters
             generation_config = GenerationConfig(
-                temperature=0.2,  # Lower temperature for more factual responses
+                temperature=temperature,
                 top_p=0.95,
-                max_output_tokens=8192,
+                max_output_tokens=max_tokens,
             )
             
-            # Generate response - with or without images
-            if image_data:
-                # Handle multimodal content (text + images)
-                from vertexai.generative_models import Part, Content
-                
-                content_parts = [Part.from_text(full_prompt)]
-                
-                # Add image parts
-                for img in image_data:
-                    if img.get('mime_type') and img.get('data'):
-                        image_part = Part.from_data(
-                            data=base64.b64decode(img['data']),
-                            mime_type=img['mime_type']
-                        )
-                        content_parts.append(image_part)
-                
-                content = Content(
-                    role="user",
-                    parts=content_parts
-                )
-                
-                response = self.model.generate_content(
-                    content,
-                    generation_config=generation_config,
-                )
-            else:
-                # Text-only response
-                response = self.model.generate_content(
-                    full_prompt,
-                    generation_config=generation_config,
-                )
+            # Combine prompts if system prompt is provided
+            full_prompt = prompt
+            if system_prompt:
+                full_prompt = f"{system_prompt}\n\n{prompt}"
             
-            if hasattr(response, 'text'):
-                return response.text
-            elif hasattr(response, 'candidates') and response.candidates:
-                return response.candidates[0].text
-            else:
-                return "I couldn't generate a response. Please try rephrasing your question."
+            # Generate response with streaming for better user experience
+            response_text = ""
+            print("Generating response", end="")
+            for chunk in self.model.generate_content(
+                full_prompt,
+                generation_config=generation_config,
+                stream=True,
+            ):
+                if chunk.candidates and chunk.candidates[0].text:
+                    response_text += chunk.candidates[0].text
+                    print(".", end="", flush=True)  # Show progress
             
+            print()  # New line after progress dots
+            
+            logger.info(f"Response length: {len(response_text)} characters")
+            return response_text
         except Exception as e:
-            logger.error(f"Error generating response: {e}")
-            return f"I encountered an error while processing your question. Please try again or rephrase your question. Technical details: {str(e)}"
-
-
-class JiraChatbot:
-    """Main class that integrates Jira client with Gemini AI for a chatbot experience"""
+            logger.error(f"Error generating response: {str(e)}")
+            return f"Error generating response: {str(e)}"
     
-    def __init__(self):
-        self.jira_client = JiraClient()
-        self.gemini_chat = GeminiChat()
-        # Store conversation history for context
-        self.conversation_history = []
-        # Maximum history to keep
-        self.max_history_length = 10
-    
-    def add_to_history(self, user_query, bot_response):
-        """Add an exchange to the conversation history"""
-        self.conversation_history.append({
-            "user": user_query,
-            "bot": bot_response,
-            "timestamp": datetime.now().isoformat()
-        })
-        
-        # Keep only the most recent exchanges
-        if len(self.conversation_history) > self.max_history_length:
-            self.conversation_history = self.conversation_history[-self.max_history_length:]
-    
-    def extract_jira_issue_keys(self, text):
-        """Extract Jira issue keys from text using regex"""
-        # Pattern for Jira issue keys like PROJECT-123
-        pattern = r'[A-Z]+-\d+'
-        return re.findall(pattern, text)
-    
-    def get_relevant_jira_data(self, query):
+    def build_system_prompt(self, context_docs=None):
         """
-        Get relevant Jira data based on the user query
+        Build a comprehensive system prompt for Gemini.
         
-        This function analyzes the query and fetches appropriate data from Jira
+        Args:
+            context_docs: List of documents to include as context
+            
+        Returns:
+            System prompt string
         """
-        relevant_data = {}
-        image_data = []
+        system_prompt = """You are a highly knowledgeable and professional AI assistant that specializes in providing accurate information from a company's Confluence knowledge base. Your responses should be:
+
+1. PRECISE AND ACCURATE: Always base your answers strictly on the provided Confluence documents. If the information isn't in the provided context, clearly state that you don't have that specific information.
+
+2. PROFESSIONAL BUT FRIENDLY: Maintain a professional tone that would be appropriate in a corporate environment, while still being approachable and helpful.
+
+3. WELL-STRUCTURED: For complex responses, use appropriate formatting with headings, bullet points, or numbered lists to improve readability. Use tables for tabular data.
+
+4. CONTEXTUALLY AWARE: If you need clarification to provide a better answer, politely ask follow-up questions to better understand the user's needs.
+
+5. SOURCE-TRANSPARENT: Always include references to the specific Confluence pages you used to answer the question. Include the exact page titles and URLs at the end of your response.
+
+When responding to technical questions:
+- Be precise with technical terminology
+- Include code snippets when relevant
+- Explain complex concepts clearly
+
+When handling data from tables:
+- Present numerical data clearly, using markdown tables if appropriate
+- Explain what the data means in business terms
+
+When images are referenced in the context:
+- Clearly describe what information the image contains
+- Explain the relevance of the image to the question
+
+If the question seems ambiguous or could have multiple interpretations:
+- Consider the most likely interpretation based on the available context
+- If necessary, provide answers to multiple interpretations
+- Politely ask for clarification
+
+If you don't have enough information to fully answer the question:
+- Clearly state what you do know based on the provided context
+- Explain what additional information would be needed
+- Suggest which Confluence spaces might contain the relevant information
+
+FORMAT YOUR RESPONSES:
+1. Start with a direct answer to the question
+2. Follow with supporting details, explanations, or elaborations
+3. For complex topics, use appropriate headings and structured formatting
+4. End with source references listing the Confluence pages you used
+
+Remember that you are assisting with company-internal information. Your responses should be helpful for employees trying to find and understand information in their company's knowledge base.
+"""
         
-        try:
-            # Extract issue keys mentioned in the query
-            issue_keys = self.extract_jira_issue_keys(query)
+        # Add context documents if provided
+        if context_docs and len(context_docs) > 0:
+            context_text = "\n\n### CONTEXT DOCUMENTS ###\n\n"
             
-            if issue_keys:
-                # Get details for each mentioned issue
-                issues_data = []
-                for issue_key in issue_keys:
-                    issue = self.jira_client.get_issue(issue_key)
-                    if "error" not in issue:
-                        issues_data.append(issue)
-                        
-                        # Get comments for the issue
-                        comments = self.jira_client.get_issue_comments(issue_key)
-                        if "error" not in comments:
-                            issue["comments"] = comments
-                        
-                        # Get attachments for the issue
-                        attachments = self.jira_client.get_issue_attachments(issue_key)
-                        if "error" not in attachments and "values" in attachments:
-                            issue["attachments"] = attachments
-                            
-                            # Download and process image attachments for Gemini
-                            for attachment in attachments.get("values", []):
-                                if "content" in attachment and "mimeType" in attachment:
-                                    if attachment["mimeType"].startswith("image/"):
-                                        attachment_data = self.jira_client.download_attachment(attachment["content"])
-                                        if "error" not in attachment_data and attachment_data.get("is_image"):
-                                            image_data.append({
-                                                "mime_type": attachment_data["content_type"],
-                                                "data": attachment_data["data"],
-                                                "filename": attachment_data["filename"]
-                                            })
+            for i, doc in enumerate(context_docs):
+                metadata = doc.get("metadata", {})
+                title = metadata.get("title", "Untitled Document")
+                url = metadata.get("url", "")
+                content = doc.get("content", "")
                 
-                if issues_data:
-                    relevant_data["issues"] = issues_data
-            
-            # Search for relevant issues if no specific issue keys were mentioned
-            else:
-                # Extract potential search terms
-                search_terms = query.lower()
-                # Remove common words that aren't useful for searching
-                stop_words = ["the", "and", "is", "in", "it", "of", "for", "a", "on", "with", "about"]
-                for word in stop_words:
-                    search_terms = search_terms.replace(f" {word} ", " ")
+                # Truncate content if too long - Gemini has context limits
+                if len(content) > 10000:
+                    content = content[:10000] + "... [content truncated]"
                 
-                # Create a JQL query based on search terms
-                jql = f'text ~ "{search_terms}" ORDER BY updated DESC'
-                
-                # Search for issues
-                search_results = self.jira_client.search_issues(jql, max_results=5)
-                if "error" not in search_results and "issues" in search_results:
-                    relevant_data["search_results"] = search_results
+                context_text += f"[DOCUMENT {i+1}]: {title}\n"
+                context_text += f"URL: {url}\n"
+                context_text += f"CONTENT: {content}\n\n"
             
-            # Check for project-related queries
-            project_pattern = r'project[s]?\s+([A-Z]+)'
-            project_matches = re.findall(project_pattern, query, re.IGNORECASE)
-            
-            if project_matches:
-                projects_data = []
-                for project_key in project_matches:
-                    project = self.jira_client.get_project(project_key.upper())
-                    if "error" not in project:
-                        projects_data.append(project)
-                
-                if projects_data:
-                    relevant_data["projects"] = projects_data
-            
-            # If no specific data found yet, get general account info
-            if not relevant_data:
-                myself = self.jira_client.get_myself()
-                if "error" not in myself:
-                    relevant_data["user"] = myself
-                
-                # Get a list of projects the user has access to
-                projects = self.jira_client.get_projects()
-                if "error" not in projects:
-                    relevant_data["available_projects"] = projects
-            
-            return relevant_data, image_data
-            
-        except Exception as e:
-            logger.error(f"Error getting relevant Jira data: {e}")
-            return {"error": str(e)}, []
+            system_prompt += context_text
+        
+        return system_prompt
+
+class ConfluenceGeminiBot:
+    """Main class that integrates Confluence content with Gemini for answering questions."""
     
-    def process_query(self, query):
+    def __init__(self, confluence_url, username, api_token):
         """
-        Process a user query and return a response
+        Initialize the bot with Confluence credentials.
         
-        This is the main method that handles the chatbot interaction
+        Args:
+            confluence_url: Base URL of Confluence instance
+            username: Confluence username
+            api_token: Confluence API token
         """
-        start_time = time.time()
-        logger.info(f"Processing query: {query}")
+        self.confluence = ConfluenceClient(confluence_url, username, api_token)
+        self.text_processor = TextProcessor()
+        self.gemini = GeminiClient()
         
-        try:
-            # Check if it's a query to clear the cache
-            if query.lower().strip() in ["clear cache", "refresh cache", "reset cache"]:
-                self.jira_client.cache.clear()
-                response = "Cache cleared. I'll fetch fresh data for your next queries."
-                self.add_to_history(query, response)
-                return response
+        # Test connection
+        self.confluence.test_connection()
+        logger.info("Initialized ConfluenceGeminiBot")
+    
+    def answer_question(self, question, temperature=0.7):
+        """
+        Answer a question using Confluence content and Gemini.
+        
+        Args:
+            question: User's question
+            temperature: Temperature for Gemini response generation
             
-            # Check if it's an irrelevant query
-            irrelevant_patterns = [
-                r'hello|hi|hey',
-                r'thank|thanks',
-                r'bye|goodbye',
-                r'how are you',
-                r'what can you do',
-                r'help me'
-            ]
+        Returns:
+            Answer from Gemini
+        """
+        logger.info(f"Answering question: {question}")
+        
+        # Check if it's a multi-part question
+        if self.text_processor.is_multi_part_question(question):
+            logger.info("Detected multi-part question, splitting into parts")
+            question_parts = self.text_processor.split_multi_part_question(question)
             
-            for pattern in irrelevant_patterns:
-                if re.match(f"^{pattern}$", query.lower().strip()):
-                    # Handle common greetings and small talk
-                    if pattern == r'hello|hi|hey':
-                        response = "Hello! I'm JiraGPT, your Jira assistant. How can I help you with your Jira queries today?"
-                    elif pattern == r'thank|thanks':
-                        response = "You're welcome! Feel free to ask if you need any more help with Jira."
-                    elif pattern == r'bye|goodbye':
-                        response = "Goodbye! Feel free to come back when you need help with Jira."
-                    elif pattern == r'how are you':
-                        response = "I'm functioning well, thank you! How can I help you with Jira today?"
-                    elif pattern == r'what can you do':
-                        response = "I can help you with various Jira-related tasks, such as:\n\n" \
-                                  "- Finding information about specific tickets (e.g., 'Tell me about RDRF-2606')\n" \
-                                  "- Searching for tickets with specific criteria\n" \
-                                  "- Explaining Jira concepts and workflows\n" \
-                                  "- Analyzing ticket data, including images and tables\n" \
-                                  "- Providing links to relevant Jira pages\n\n" \
-                                  "How can I assist you today?"
-                    elif pattern == r'help me':
-                        response = "I'd be happy to help! To get started, try asking specific questions about your Jira tickets, projects, or workflows. For example:\n\n" \
-                                  "- 'Tell me about ticket RDRF-2606'\n" \
-                                  "- 'What are the open issues in my RDS-SPHERE project?'\n" \
-                                  "- 'How do I create alerts in Jira?'\n\n" \
-                                  "The more specific your question, the better I can assist you!"
-                    
-                    self.add_to_history(query, response)
-                    return response
-            
-            # Get relevant data from Jira for the query
-            relevant_data, image_data = self.get_relevant_jira_data(query)
-            
-            # Check if we need to ask a clarifying question
-            if not relevant_data or ("error" in relevant_data and not relevant_data.get("user")):
-                # Simplified logic for asking clarifying questions
-                if "ticket" in query.lower() or "issue" in query.lower():
-                    response = "I need more information to help you. Could you provide the specific ticket ID (e.g., RDRF-2606)?"
-                elif "project" in query.lower():
-                    response = "I need more information to help you. Could you provide the specific project key or name?"
-                else:
-                    # Generate a response with limited context
-                    history_context = {
-                        "conversation_history": self.conversation_history[-3:] if self.conversation_history else []
-                    }
-                    response = self.gemini_chat.generate_response(query, history_context)
-            else:
-                # Add conversation history to the context
-                relevant_data["conversation_history"] = self.conversation_history[-3:] if self.conversation_history else []
+            if len(question_parts) > 1:
+                logger.info(f"Split into {len(question_parts)} parts: {question_parts}")
                 
-                # Generate response using Gemini
-                response = self.gemini_chat.generate_response(query, relevant_data, image_data)
-            
-            # Add the exchange to conversation history
-            self.add_to_history(query, response)
-            
-            # Log processing time
-            elapsed_time = time.time() - start_time
-            logger.info(f"Query processed in {elapsed_time:.2f} seconds")
-            
-            return response
-            
-        except Exception as e:
-            logger.error(f"Error processing query: {e}")
-            return f"I encountered an error while processing your question. Please try again or rephrase your question. Technical details: {str(e)}"
-
-
-def run_chatbot():
-    """Run the chatbot in an interactive loop"""
-    print("\n===== JiraGPT Chatbot =====")
-    print("Type 'exit' or 'quit' to end the conversation.")
-    print("Type 'clear cache' to refresh Jira data.")
-    
-    chatbot = JiraChatbot()
-    
-    while True:
-        user_input = input("\nYou: ").strip()
+                # Process each part separately
+                responses = []
+                for i, part in enumerate(question_parts):
+                    logger.info(f"Processing question part {i+1}: {part}")
+                    part_response = self._process_single_question(part, temperature)
+                    responses.append(f"Part {i+1}: {part}\n\n{part_response}")
+                
+                # Combine responses
+                combined_response = "\n\n" + "-" * 30 + "\n\n".join(responses)
+                return combined_response
         
-        if user_input.lower() in ["exit", "quit", "bye"]:
-            print("\nChatbot: Goodbye! Have a great day.")
-            break
+        # For single questions or if splitting failed
+        return self._process_single_question(question, temperature)
+    
+    def _process_single_question(self, question, temperature=0.7):
+        """
+        Process a single question.
         
-        response = chatbot.process_query(user_input)
-        print(f"\nChatbot: {response}")
+        Args:
+            question: Question to answer
+            temperature: Temperature for response generation
+            
+        Returns:
+            Answer to the question
+        """
+        # Extract keywords for better search
+        keywords = self.text_processor.extract_keywords(question)
+        logger.info(f"Extracted keywords: {keywords}")
+        
+        # Create search query - use either keywords or original question
+        search_query = " ".join(keywords) if keywords else question
+        logger.info(f"Search query: {search_query}")
+        
+        # Search for relevant content using Confluence's built-in search
+        relevant_docs = self.confluence.search_content(search_query)
+        
+        if not relevant_docs:
+            logger.warning(f"No relevant documents found for question: {question}")
+            return "I couldn't find any information in the Confluence knowledge base that answers your question. Could you rephrase your question or provide more details?"
+        
+        # Prepare context for Gemini
+        logger.info(f"Found {len(relevant_docs)} relevant documents for the question")
+        
+        # Build system prompt with context
+        system_prompt = self.gemini.build_system_prompt(context_docs=relevant_docs)
+        
+        # Generate response
+        response = self.gemini.generate_response(
+            prompt=question,
+            system_prompt=system_prompt,
+            temperature=temperature
+        )
+        
+        return response
+    
+    def interactive_session(self):
+        """Start an interactive Q&A session in the console."""
+        print("\n=== Confluence Gemini Bot ===")
+        print("Type 'exit' or 'quit' to end the session.")
+        
+        while True:
+            try:
+                question = input("\nYour question: ")
+                
+                if question.lower() in ['exit', 'quit']:
+                    print("Goodbye!")
+                    break
+                
+                # Process the question
+                print("\nSearching Confluence...")
+                answer = self.answer_question(question)
+                
+                print("\nAnswer:")
+                print("=" * 80)
+                print(answer)
+                print("=" * 80)
+            except KeyboardInterrupt:
+                print("\nSession interrupted. Goodbye!")
+                break
+            except Exception as e:
+                logger.error(f"Error in interactive session: {str(e)}")
+                print(f"An error occurred: {str(e)}")
 
+# Main function to run the bot
+def main():
+    """Main function to run the application."""
+    # Configuration
+    confluence_url = os.environ.get("CONFLUENCE_URL", "https://your-company.atlassian.net")
+    username = os.environ.get("CONFLUENCE_USERNAME", "your.email@company.com")
+    api_token = os.environ.get("CONFLUENCE_API_TOKEN", "your-api-token")
+    
+    # Initialize the bot
+    try:
+        print("Initializing Confluence Gemini Bot...")
+        bot = ConfluenceGeminiBot(confluence_url, username, api_token)
+        
+        # Start interactive session
+        bot.interactive_session()
+    except Exception as e:
+        logger.error(f"Error initializing bot: {str(e)}")
+        print(f"Error: {str(e)}")
 
 if __name__ == "__main__":
-    run_chatbot()
+    main()
