@@ -16,6 +16,27 @@ from vertexai.generative_models import GenerationConfig, GenerativeModel
 from google.api_core.exceptions import GoogleAPICallError
 import pandas as pd
 from tabulate import tabulate
+import nltk
+import pickle
+from nltk.tokenize import word_tokenize
+from nltk.stem import WordNetLemmatizer
+from nltk.corpus import stopwords
+from collections import defaultdict
+import string
+
+# Download NLTK resources
+try:
+    nltk.data.find('tokenizers/punkt')
+except LookupError:
+    nltk.download('punkt')
+try:
+    nltk.data.find('corpora/wordnet')
+except LookupError:
+    nltk.download('wordnet')
+try:
+    nltk.data.find('corpora/stopwords')
+except LookupError:
+    nltk.download('stopwords')
 
 # Disable SSL warnings globally
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -37,18 +58,29 @@ REGION = os.environ.get("REGION", "us-central1")
 MODEL_NAME = os.environ.get("MODEL_NAME", "gemini-2.0-flash-001")
 MULTIMODAL_MODEL = os.environ.get("MULTIMODAL_MODEL", "gemini-2.0-pro-vision")
 
+# Hard-coded credentials (REPLACE THESE WITH YOUR ACTUAL CREDENTIALS)
+DEFAULT_SERVER_URL = "https://cmegroup-restapi.onbmc.com"
+DEFAULT_USERNAME = "your_username_here"  # Replace with your actual username
+DEFAULT_PASSWORD = "your_password_here"  # Replace with your actual password
+
+# Cache file locations
+CACHE_DIR = "remedy_cache"
+INCIDENTS_CACHE_FILE = os.path.join(CACHE_DIR, "incidents_cache.pkl")
+CACHE_EXPIRY = 24 * 60 * 60  # 24 hours in seconds
+
 class RemedyClient:
     """
     Client for BMC Remedy REST API operations with comprehensive error handling and
     advanced querying capabilities.
     """
-    def __init__(self, server_url, username=None, password=None, ssl_verify=False):
+    def __init__(self, server_url=DEFAULT_SERVER_URL, username=DEFAULT_USERNAME, 
+                 password=DEFAULT_PASSWORD, ssl_verify=False):
         """
         Initialize the Remedy client with server and authentication details.
         Args:
-            server_url: The base URL of the Remedy server (e.g., https://cmegroup-restapi.onbmc.com)
-            username: Username for authentication (will prompt if None)
-            password: Password for authentication (will prompt if None)
+            server_url: The base URL of the Remedy server
+            username: Username for authentication
+            password: Password for authentication
             ssl_verify: Whether to verify SSL certificates (set to False to disable verification)
         """
         self.server_url = server_url.rstrip('/')
@@ -70,59 +102,256 @@ class RemedyClient:
             self.ssl_verify = True
             
         logger.info(f"Initialized Remedy client for {self.server_url}")
-
-    def login(self):
-        """
-        Log in to Remedy and get authentication token.
-        Returns:
-            tuple: (returnVal, token) where returnVal is 1 on success, -1 on failure
-        """
-        if not self.username:
-            self.username = input("Enter Username: ")
-        if not self.password:
-            self.password = getpass.getpass(prompt="Enter Password: ")
-            
-        logger.info(f"Attempting to login as {self.username}")
-        url = f"{self.server_url}/api/jwt/login"
-        payload = {"username": self.username, "password": self.password}
-        headers = {"content-type": "application/x-www-form-urlencoded"}
         
-        try:
-            r = requests.post(url, data=payload, headers=headers, verify=self.ssl_verify)
-            if r.status_code == 200:
-                self.token = r.text
-                self.last_login_time = time.time()
-                self.session_active = True
-                logger.info("Login successful")
-                return 1, self.token
-            else:
-                logger.error(f"Login failed with status code: {r.status_code}")
-                print(f"Failure...")
-                print(f"Status Code: {r.status_code}")
-                return -1, r.text
-        except Exception as e:
-            logger.error(f"Login error: {str(e)}")
-            return -1, str(e)
-    
-    def ensure_logged_in(self):
+        # Cached data storage
+        self.incidents_cache = {}
+        self.support_groups_cache = set()
+        self.assignees_cache = set()
+        self.last_cache_refresh = None
+        
+        # Ensure cache directory exists
+        if not os.path.exists(CACHE_DIR):
+            os.makedirs(CACHE_DIR)
+
+    def fetch_and_cache_all_incidents(self, days_back=30, status=None):
         """
-        Ensure the client is logged in, refreshing the token if needed.
+        Fetch and cache all incidents from the last X days.
+        Args:
+            days_back: Number of days to look back for incidents
+            status: Optional status filter (e.g., "Open", "Closed")
         Returns:
-            bool: True if logged in, False otherwise
+            bool: True if successful, False otherwise
         """
-        # If we have never logged in, do it now
-        if not self.token:
-            status, _ = self.login()
-            return status == 1
+        if not self.ensure_logged_in():
+            logger.error("Failed to log in. Cannot fetch incidents.")
+            return False
             
-        # Check if token might be expired based on time
-        current_time = time.time()
-        if self.last_login_time and (current_time - self.last_login_time) > self.token_expiry * 0.9:
-            logger.info("Token may be expired, refreshing...")
-            status, _ = self.login()
-            return status == 1
+        logger.info(f"Fetching all incidents from the past {days_back} days")
+        
+        # Calculate date range
+        end_date = datetime.now()
+        start_date = end_date - timedelta(days=days_back)
+        
+        start_datetime = start_date.strftime("%Y-%m-%d 00:00:00.000")
+        end_datetime = end_date.strftime("%Y-%m-%d 23:59:59.999")
+        
+        # Create qualified query
+        query_parts = [f"'Submit Date' >= \"{start_datetime}\" AND 'Submit Date' <= \"{end_datetime}\""]
+        
+        # Add status filter if provided
+        if status:
+            query_parts.append(f"'Status'=\"{status}\"")
             
-        return True
+        qualified_query = " AND ".join(query_parts)
+        
+        # Fields to retrieve (extensive list to have complete data)
+        fields = [
+            "Assignee", "Incident Number", "Description", "Status", "Owner",
+            "Submitter", "Impact", "Owner Group", "Submit Date", "Assigned Group",
+            "Priority", "Environment", "Summary", "Support Group Name",
+            "Request Assignee", "Work Order ID", "Request Manager", "Last Modified Date",
+            "Last Modified By", "Resolution", "Notes"
+        ]
+        
+        # Set a high limit to get as many incidents as possible
+        limit = 10000
+        
+        # Get the incidents
+        result = self.query_form("HPD:Help Desk", qualified_query, fields, limit=limit)
+        
+        if result and "entries" in result:
+            incidents = result["entries"]
+            logger.info(f"Retrieved {len(incidents)} incidents from the past {days_back} days")
+            
+            # Process and store in cache
+            self.incidents_cache = {}
+            
+            # Extract support groups and assignees
+            self.support_groups_cache = set()
+            self.assignees_cache = set()
+            
+            # Process each incident
+            for incident in incidents:
+                if "values" in incident and "Incident Number" in incident["values"]:
+                    incident_id = incident["values"]["Incident Number"]
+                    self.incidents_cache[incident_id] = incident
+                    
+                    # Extract support group
+                    if "Support Group Name" in incident["values"] and incident["values"]["Support Group Name"]:
+                        self.support_groups_cache.add(incident["values"]["Support Group Name"])
+                        
+                    # Extract assignee
+                    if "Assignee" in incident["values"] and incident["values"]["Assignee"]:
+                        self.assignees_cache.add(incident["values"]["Assignee"])
+            
+            # Save cache to disk
+            self._save_cache_to_disk()
+            
+            # Update last refresh time
+            self.last_cache_refresh = time.time()
+            
+            logger.info(f"Successfully cached {len(self.incidents_cache)} incidents")
+            logger.info(f"Extracted {len(self.support_groups_cache)} support groups and {len(self.assignees_cache)} assignees")
+            
+            return True
+        else:
+            logger.error("Failed to retrieve incidents for caching")
+            return False
+            
+    def _save_cache_to_disk(self):
+        """Save the cached data to disk for persistence."""
+        try:
+            # Ensure cache directory exists
+            if not os.path.exists(CACHE_DIR):
+                os.makedirs(CACHE_DIR)
+                
+            # Save incidents cache
+            with open(INCIDENTS_CACHE_FILE, 'wb') as f:
+                pickle.dump({
+                    'incidents': self.incidents_cache,
+                    'support_groups': self.support_groups_cache,
+                    'assignees': self.assignees_cache,
+                    'timestamp': time.time()
+                }, f)
+                
+            logger.info(f"Cache saved to {INCIDENTS_CACHE_FILE}")
+            return True
+        except Exception as e:
+            logger.error(f"Error saving cache to disk: {str(e)}")
+            return False
+            
+    def _load_cache_from_disk(self):
+        """Load cached data from disk if available and not expired."""
+        try:
+            if os.path.exists(INCIDENTS_CACHE_FILE):
+                with open(INCIDENTS_CACHE_FILE, 'rb') as f:
+                    cache_data = pickle.load(f)
+                    
+                # Check if cache is expired
+                cache_timestamp = cache_data.get('timestamp', 0)
+                if time.time() - cache_timestamp > CACHE_EXPIRY:
+                    logger.info(f"Cache is expired (older than {CACHE_EXPIRY/3600} hours)")
+                    return False
+                    
+                # Load cached data
+                self.incidents_cache = cache_data.get('incidents', {})
+                self.support_groups_cache = cache_data.get('support_groups', set())
+                self.assignees_cache = cache_data.get('assignees', set())
+                self.last_cache_refresh = cache_timestamp
+                
+                logger.info(f"Loaded {len(self.incidents_cache)} incidents from cache")
+                return True
+            else:
+                logger.info("No cache file found")
+                return False
+        except Exception as e:
+            logger.error(f"Error loading cache from disk: {str(e)}")
+            return False
+    
+class NLPProcessor:
+    """
+    Processor for natural language processing tasks on incident data.
+    Provides tokenization, lemmatization, and text preprocessing for better matching.
+    """
+    def __init__(self):
+        """Initialize the NLP processor with required components."""
+        self.lemmatizer = WordNetLemmatizer()
+        self.stop_words = set(stopwords.words('english'))
+        self.punctuation_translator = str.maketrans('', '', string.punctuation)
+        
+        # Inverted index for fast searching
+        self.incident_index = defaultdict(list)
+        self.incidents_processed = False
+        
+    def preprocess_text(self, text):
+        """
+        Preprocess text by tokenizing, removing stop words, and lemmatizing.
+        Args:
+            text: Text to preprocess
+        Returns:
+            list: Preprocessed tokens
+        """
+        if not text:
+            return []
+            
+        # Convert to lowercase and remove punctuation
+        text = text.lower().translate(self.punctuation_translator)
+        
+        # Tokenize
+        tokens = word_tokenize(text)
+        
+        # Remove stop words and lemmatize
+        tokens = [self.lemmatizer.lemmatize(token) for token in tokens if token not in self.stop_words]
+        
+        return tokens
+        
+    def build_index_from_incidents(self, incidents):
+        """
+        Build an inverted index from incident data for faster searching.
+        Args:
+            incidents: Dictionary of incidents {incident_id: incident_data}
+        """
+        logger.info("Building search index from incidents")
+        self.incident_index = defaultdict(list)
+        
+        for incident_id, incident in incidents.items():
+            if "values" in incident:
+                values = incident["values"]
+                
+                # Process summary and description
+                summary = values.get("Summary", "")
+                description = values.get("Description", "")
+                
+                # Combine texts for processing
+                combined_text = f"{summary} {description}"
+                tokens = self.preprocess_text(combined_text)
+                
+                # Add to index (token -> incident_id)
+                for token in tokens:
+                    if token not in self.incident_index[token]:
+                        self.incident_index[token].append(incident_id)
+        
+        self.incidents_processed = True
+        logger.info(f"Built search index with {len(self.incident_index)} unique tokens")
+        
+    def search(self, query, incidents, max_results=20):
+        """
+        Search for incidents matching the query using the inverted index.
+        Args:
+            query: Search query
+            incidents: Dictionary of incidents to search in
+            max_results: Maximum number of results to return
+        Returns:
+            list: Matching incidents sorted by relevance
+        """
+        # Ensure index is built
+        if not self.incidents_processed:
+            self.build_index_from_incidents(incidents)
+            
+        # Preprocess query
+        query_tokens = self.preprocess_text(query)
+        
+        # Find matching incidents
+        matching_incident_ids = []
+        scores = {}
+        
+        for token in query_tokens:
+            if token in self.incident_index:
+                for incident_id in self.incident_index[token]:
+                    if incident_id not in scores:
+                        scores[incident_id] = 0
+                    scores[incident_id] += 1
+        
+        # Sort by score (descending)
+        matching_incident_ids = sorted(scores.keys(), key=lambda x: scores[x], reverse=True)[:max_results]
+        
+        # Get full incidents
+        results = []
+        for incident_id in matching_incident_ids:
+            if incident_id in incidents:
+                results.append(incidents[incident_id])
+                
+        return results
         
     def logout(self):
         """
@@ -988,30 +1217,47 @@ class RemedyChatbot:
     Chatbot that integrates BMC Remedy with Gemini for natural language interactions.
     """
     
-    def __init__(self, server_url, username=None, password=None):
+    def __init__(self, server_url=DEFAULT_SERVER_URL, username=DEFAULT_USERNAME, password=DEFAULT_PASSWORD):
         """
         Initialize the chatbot with Remedy client and Gemini AI.
         Args:
             server_url: The Remedy server URL
-            username: Optional username for Remedy
-            password: Optional password for Remedy
+            username: Username for Remedy
+            password: Password for Remedy
         """
         self.remedy_client = RemedyClient(server_url, username, password, ssl_verify=False)
         self.gemini_ai = GeminiAI()
-        
-        # Cache to store retrieved data for faster responses
-        self.cache = {}
+        self.nlp_processor = NLPProcessor()
         
         # Conversation history for context
         self.conversation_history = []
         self.max_history_length = 10
         
-        # Initialize by logging in to Remedy
+        # Initialize by logging in and loading cache
+        logger.info("Initializing Remedy chatbot")
+        self._initialize()
+        
+    def _initialize(self):
+        """Initialize the chatbot by logging in and loading or building cache."""
+        # First, try to log in
         status, _ = self.remedy_client.login()
         if status != 1:
-            logger.error("Failed to initialize Remedy client")
-        else:
-            logger.info("Successfully initialized Remedy chatbot")
+            logger.error("Failed to initialize Remedy client - login failed")
+            return False
+            
+        # Try to load cache from disk
+        cache_loaded = self.remedy_client._load_cache_from_disk()
+        
+        # If cache not loaded or expired, fetch fresh data
+        if not cache_loaded:
+            logger.info("Cache not available or expired, fetching fresh data")
+            self.remedy_client.fetch_and_cache_all_incidents(days_back=30)
+        
+        # Build NLP index from the cached incidents
+        self.nlp_processor.build_index_from_incidents(self.remedy_client.incidents_cache)
+        
+        logger.info("Successfully initialized Remedy chatbot")
+        return True
             
     def _get_system_prompt(self):
         """
@@ -1045,7 +1291,7 @@ class RemedyChatbot:
         
     def process_query(self, query):
         """
-        Process a natural language query about Remedy incidents.
+        Process a natural language query about Remedy incidents using the cached data.
         Args:
             query: The user's query
         Returns:
@@ -1062,19 +1308,32 @@ class RemedyChatbot:
             self.conversation_history.append({"role": "assistant", "content": response})
             return response
             
-        # First, use direct pattern matching for common query types to bypass LLM
-        # for efficiency when the query is straightforward
+        if query.lower() == "refresh cache":
+            success = self.remedy_client.fetch_and_cache_all_incidents(days_back=30)
+            if success:
+                self.nlp_processor.build_index_from_incidents(self.remedy_client.incidents_cache)
+                response = "Cache refreshed successfully! I now have the latest incident data."
+            else:
+                response = "Failed to refresh cache. Please check the logs for details."
+            self.conversation_history.append({"role": "assistant", "content": response})
+            return response
+        
+        # First, check for direct incident ID references
         incident_id_pattern = r"(?:^|\s)(INC\d{12})(?:$|\s)"
         incident_id_match = re.search(incident_id_pattern, query)
         
         if incident_id_match:
-            # Direct lookup by incident ID
+            # Direct lookup by incident ID from cache
             incident_id = incident_id_match.group(1)
             logger.info(f"Direct lookup for incident ID: {incident_id}")
-            incident = self.remedy_client.get_incident(incident_id)
+            incident = self.remedy_client.get_cached_incident(incident_id)
             
+            if not incident:
+                # If not in cache, try to get it directly (it might be too old or too new)
+                incident = self.remedy_client.get_incident(incident_id)
+                
             if incident:
-                # Use Gemini to format the response, but with a more focused prompt
+                # Use Gemini to format the response
                 prompt = f"""
                 Here is the data for incident {incident_id}:
                 {json.dumps(incident, indent=2)}
@@ -1085,323 +1344,21 @@ class RemedyChatbot:
                 """
                 response = self.gemini_ai.generate_response(prompt)
             else:
-                response = f"I couldn't find incident {incident_id} in the system. It may not exist or you might not have permission to view it."
+                response = f"I couldn't find incident {incident_id} in the system. It may not exist, be too old to be in our cache, or you might not have permission to view it."
                 
             self.conversation_history.append({"role": "assistant", "content": response})
             return response
             
-        # Implement a more robust approach that doesn't rely on JSON parsing
-        # We'll use direct pattern matching first, then fallback to more complex analysis
+        # Determine the query type and parameters
+        query_type, parameters = self._analyze_query(query)
         
-        # Check for specific patterns in the query and analyze intent
-        query_lower = query.lower()
+        # Retrieve the requested information based on the query type
+        retrieved_data = self._retrieve_cached_data(query_type, parameters)
         
-        # Handle date-based queries
-        date_patterns = [
-            (r"today|yesterday|last week|this week|last month", "date"),
-            (r"(\d{4}-\d{2}-\d{2}|\d{1,2}/\d{1,2}/\d{4}|\d{1,2}-\d{1,2}-\d{4})", "date"),
-            (r"on (monday|tuesday|wednesday|thursday|friday|saturday|sunday)", "date")
-        ]
-        
-        for pattern, query_type in date_patterns:
-            if re.search(pattern, query_lower):
-                logger.info(f"Detected date-based query: {query}")
-                # Extract the date expression
-                if "today" in query_lower:
-                    date_str = "today"
-                elif "yesterday" in query_lower:
-                    date_str = "yesterday"
-                elif "last week" in query_lower:
-                    date_str = "last week"
-                elif "this week" in query_lower:
-                    date_str = "this week"
-                elif "last month" in query_lower:
-                    date_str = "last month"
-                else:
-                    # Try to extract a date from the query
-                    date_match = re.search(r"(\d{4}-\d{2}-\d{2}|\d{1,2}/\d{1,2}/\d{4}|\d{1,2}-\d{1,2}-\d{4})", query)
-                    if date_match:
-                        date_str = date_match.group(1)
-                    else:
-                        # Check for day names
-                        day_match = re.search(r"(monday|tuesday|wednesday|thursday|friday|saturday|sunday)", query_lower)
-                        if day_match:
-                            date_str = day_match.group(1)
-                        else:
-                            date_str = "today"  # Default to today
-                
-                # Check for status in the query
-                status = None
-                status_patterns = ["open", "closed", "resolved", "in progress", "pending"]
-                for status_pattern in status_patterns:
-                    if status_pattern in query_lower:
-                        status = status_pattern.capitalize()
-                        break
-                
-                # Check for owner group in the query
-                owner_group = None
-                if "group" in query_lower or "team" in query_lower:
-                    group_match = re.search(r"(for|by|to) (?:the )?(.*?) (group|team)", query_lower)
-                    if group_match:
-                        owner_group = group_match.group(2).capitalize()
-                
-                # Get the incidents
-                retrieved_data = {
-                    "type": "incidents_by_date",
-                    "data": self.remedy_client.get_incidents_by_date(date_str, status, owner_group),
-                    "parameters": {"date": date_str, "status": status, "owner_group": owner_group}
-                }
-                
-                # Generate response using the retrieved data
-                return self._generate_response_from_data(query, retrieved_data)
-        
-        # Handle status-based queries
-        status_patterns = [
-            (r"(open|pending|closed|resolved|in progress) (incidents|tickets)", "status"),
-            (r"incidents (that are |which are )?(open|pending|closed|resolved|in progress)", "status"),
-            (r"(show|list|find|get) (all )?(open|pending|closed|resolved|in progress) (incidents|tickets)", "status")
-        ]
-        
-        for pattern, query_type in status_patterns:
-            match = re.search(pattern, query_lower)
-            if match:
-                logger.info(f"Detected status-based query: {query}")
-                # Extract status
-                status_match = re.search(r"(open|pending|closed|resolved|in progress)", query_lower)
-                if status_match:
-                    status = status_match.group(1).capitalize()
-                    limit = 100  # Default limit
-                    
-                    # Check for any specified limit
-                    limit_match = re.search(r"(limit|show|display|get) (\d+)", query_lower)
-                    if limit_match:
-                        try:
-                            limit = int(limit_match.group(2))
-                        except ValueError:
-                            limit = 100
-                    
-                    # Get the incidents
-                    retrieved_data = {
-                        "type": "incidents_by_status",
-                        "data": self.remedy_client.get_incidents_by_status(status, limit),
-                        "parameters": {"status": status, "limit": limit}
-                    }
-                    
-                    # Generate response using the retrieved data
-                    return self._generate_response_from_data(query, retrieved_data)
-        
-        # Handle assignee-based queries
-        assignee_patterns = [
-            (r"(assigned to|being worked on by|owned by) (.*?)([\.\?]|$| and | or )", "assignee"),
-            (r"(show|list|find|get) (incidents|tickets) (assigned to|being worked on by|owned by) (.*?)([\.\?]|$| and | or )", "assignee"),
-            (r"what('s| is) (.*?) working on", "assignee")
-        ]
-        
-        for pattern, query_type in assignee_patterns:
-            match = re.search(pattern, query_lower)
-            if match and "assigned" in query_lower:
-                logger.info(f"Detected assignee-based query: {query}")
-                # Extract assignee
-                assignee_match = re.search(r"(assigned to|being worked on by|owned by) (.*?)([\.\?]|$| and | or )", query_lower)
-                if assignee_match:
-                    assignee = assignee_match.group(2).strip()
-                    limit = 100  # Default limit
-                    
-                    # Get the incidents
-                    retrieved_data = {
-                        "type": "incidents_by_assignee",
-                        "data": self.remedy_client.get_incidents_by_assignee(assignee, limit),
-                        "parameters": {"assignee": assignee, "limit": limit}
-                    }
-                    
-                    # Generate response using the retrieved data
-                    return self._generate_response_from_data(query, retrieved_data)
-            elif match and "working on" in query_lower:
-                logger.info(f"Detected assignee-based query (working on): {query}")
-                # Extract assignee
-                assignee_match = re.search(r"what('s| is) (.*?) working on", query_lower)
-                if assignee_match:
-                    assignee = assignee_match.group(2).strip()
-                    limit = 100  # Default limit
-                    
-                    # Get the incidents
-                    retrieved_data = {
-                        "type": "incidents_by_assignee",
-                        "data": self.remedy_client.get_incidents_by_assignee(assignee, limit),
-                        "parameters": {"assignee": assignee, "limit": limit}
-                    }
-                    
-                    # Generate response using the retrieved data
-                    return self._generate_response_from_data(query, retrieved_data)
-        
-        # Handle search queries
-        search_patterns = [
-            (r"(search|find|look for|incidents about|tickets about|related to) (.*?)([\.\?]|$)", "search"),
-            (r"(show|list|get) (incidents|tickets) (about|related to|containing|mentioning) (.*?)([\.\?]|$)", "search")
-        ]
-        
-        for pattern, query_type in search_patterns:
-            match = re.search(pattern, query_lower)
-            if match:
-                logger.info(f"Detected search query: {query}")
-                # Extract search terms
-                if "about" in query_lower or "related to" in query_lower:
-                    search_match = re.search(r"(about|related to|containing|mentioning) (.*?)([\.\?]|$)", query_lower)
-                    if search_match:
-                        search_text = search_match.group(2).strip()
-                else:
-                    search_match = re.search(r"(search|find|look for) (.*?)([\.\?]|$)", query_lower)
-                    if search_match:
-                        search_text = search_match.group(2).strip()
-                    else:
-                        search_text = query_lower  # Use the whole query as fallback
-                
-                limit = 50  # Default limit
-                
-                # Get the incidents
-                retrieved_data = {
-                    "type": "search_results",
-                    "data": self.remedy_client.search_incidents(search_text, limit),
-                    "parameters": {"search_text": search_text, "limit": limit}
-                }
-                
-                # Generate response using the retrieved data
-                return self._generate_response_from_data(query, retrieved_data)
-        
-        # Handle support group queries
-        support_group_patterns = [
-            (r"(support group|team) (.*?)([\.\?]|$| and | or )", "support_group"),
-            (r"(show|list|find|get) (incidents|tickets) (for|from|by) (support group|team|group) (.*?)([\.\?]|$| and | or )", "support_group")
-        ]
-        
-        for pattern, query_type in support_group_patterns:
-            match = re.search(pattern, query_lower)
-            if match:
-                logger.info(f"Detected support group query: {query}")
-                # Extract support group
-                support_group_match = re.search(r"(support group|team|group) (.*?)([\.\?]|$| and | or )", query_lower)
-                if support_group_match:
-                    support_group = support_group_match.group(2).strip()
-                    limit = 100  # Default limit
-                    
-                    # Get the incidents
-                    retrieved_data = {
-                        "type": "incidents_by_support_group",
-                        "data": self.remedy_client.get_incidents_by_support_group(support_group, limit),
-                        "parameters": {"support_group": support_group, "limit": limit}
-                    }
-                    
-                    # Generate response using the retrieved data
-                    return self._generate_response_from_data(query, retrieved_data)
-        
-        # Handle recent incidents queries
-        recent_patterns = [
-            (r"recent (incidents|tickets)", "recent"),
-            (r"(show|list|find|get) recent (incidents|tickets)", "recent"),
-            (r"(incidents|tickets) (from|in) (the )?(last|past) (\d+) (days|weeks)", "recent")
-        ]
-        
-        for pattern, query_type in recent_patterns:
-            match = re.search(pattern, query_lower)
-            if match:
-                logger.info(f"Detected recent incidents query: {query}")
-                # Extract time frame
-                days = 7  # Default to last 7 days
-                time_match = re.search(r"(last|past) (\d+) (days|weeks)", query_lower)
-                if time_match:
-                    try:
-                        time_value = int(time_match.group(2))
-                        if time_match.group(3) == "weeks":
-                            days = time_value * 7
-                        else:
-                            days = time_value
-                    except ValueError:
-                        days = 7
-                
-                limit = 100  # Default limit
-                
-                # Get the incidents
-                retrieved_data = {
-                    "type": "recent_incidents",
-                    "data": self.remedy_client.get_recent_incidents(days, limit),
-                    "parameters": {"days": days, "limit": limit}
-                }
-                
-                # Generate response using the retrieved data
-                return self._generate_response_from_data(query, retrieved_data)
-        
-        # Handle history queries
-        history_patterns = [
-            (r"(history|changes|modifications|updates) (of|for|to) (incident )?(INC\d{12})", "history"),
-            (r"(who|what) (changed|modified|updated) (incident )?(INC\d{12})", "history")
-        ]
-        
-        for pattern, query_type in history_patterns:
-            match = re.search(pattern, query_lower)
-            if match:
-                logger.info(f"Detected history query: {query}")
-                # Extract incident ID
-                incident_id_match = re.search(r"(INC\d{12})", query)
-                if incident_id_match:
-                    incident_id = incident_id_match.group(1)
-                    
-                    # Get the incident, history, and attachments
-                    incident = self.remedy_client.get_incident(incident_id)
-                    history = self.remedy_client.get_incident_history(incident_id)
-                    attachments = self.remedy_client.get_incident_attachments(incident_id)
-                    
-                    retrieved_data = {
-                        "type": "incident_history",
-                        "data": {
-                            "incident": incident,
-                            "history": history,
-                            "attachments": attachments
-                        },
-                        "parameters": {"incident_id": incident_id}
-                    }
-                    
-                    # Generate response using the retrieved data
-                    return self._generate_response_from_data(query, retrieved_data)
-        
-        # If we've reached here, we couldn't identify the query type through patterns
-        # Fallback to a simple search query
-        logger.info(f"Using fallback for query: {query}")
-        
-        # Extract potential search terms (remove common words)
-        search_text = query
-        common_words = ["show", "me", "list", "get", "find", "all", "incidents", "tickets", "the", "a", "an", "in", "on", "for", "about", "with", "to", "from", "by", "and", "or", "of"]
-        for word in common_words:
-            search_text = re.sub(r'\b' + word + r'\b', '', search_text, flags=re.IGNORECASE)
-        
-        search_text = search_text.strip()
-        
-        # Use the cleaned search text if it's not too short, otherwise use the original query
-        if len(search_text) < 3:
-            search_text = query
-        
-        # Get the incidents
-        retrieved_data = {
-            "type": "search_results",
-            "data": self.remedy_client.search_incidents(search_text, 50),
-            "parameters": {"search_text": search_text, "limit": 50}
-        }
-        
-        # Generate response using the retrieved data
-        return self._generate_response_from_data(query, retrieved_data)
-        
-    def _generate_response_from_data(self, query, retrieved_data):
-        """
-        Generate a response from retrieved data using Gemini.
-        Args:
-            query: Original user query
-            retrieved_data: Data retrieved from Remedy
-        Returns:
-            str: Formatted response
-        """
+        # Generate the response
         system_prompt = self._get_system_prompt()
         history_text = self._format_conversation_history()
         
-        # Form a prompt for Gemini to generate the final response
         if retrieved_data:
             prompt = f"""
             {system_prompt}
@@ -1419,18 +1376,38 @@ class RemedyChatbot:
             Add a link or reference to any relevant incidents by their ID so the user can look them up directly if needed.
             """
         else:
-            # No data retrieved, give a response explaining why
-            prompt = f"""
-            {system_prompt}
+            # Try a free text search using NLP
+            logger.info(f"No structured data found for query, trying NLP search: {query}")
             
-            Conversation history:
-            {history_text}
+            search_results = self.nlp_processor.search(query, self.remedy_client.incidents_cache)
             
-            Current query: {query}
-            
-            I was unable to retrieve any relevant information from Remedy for this query. Please provide a helpful response explaining why this might be the case (such as no matching incidents, ambiguous query, etc.) and suggesting alternatives or asking for clarification. Be friendly and helpful.
-            """
-            
+            if search_results:
+                prompt = f"""
+                {system_prompt}
+                
+                Conversation history:
+                {history_text}
+                
+                Current query: {query}
+                
+                I performed a semantic search for your query and found these potentially relevant incidents:
+                {json.dumps(search_results, indent=2, default=str)}
+                
+                Please provide a helpful response summarizing these results in a clear, well-organized way. Format the response appropriately using markdown for readability. If there are multiple incidents, consider using a table format when appropriate. Make sure to include incident numbers, summaries, statuses, and priorities.
+                """
+            else:
+                # No data retrieved, give a response explaining why
+                prompt = f"""
+                {system_prompt}
+                
+                Conversation history:
+                {history_text}
+                
+                Current query: {query}
+                
+                I was unable to find any relevant information in our cached incident data. Please provide a helpful response explaining why this might be the case (such as no matching incidents, ambiguous query, etc.) and suggesting alternatives or asking for clarification. Be friendly and helpful.
+                """
+                
         # Generate the response
         response = self.gemini_ai.generate_response(prompt)
         
@@ -1438,6 +1415,249 @@ class RemedyChatbot:
         self.conversation_history.append({"role": "assistant", "content": response})
         
         return response
+        
+        # Form a prompt for Gemini to generate the final response
+    def _analyze_query(self, query):
+        """
+        Analyze a query to determine its type and extract parameters.
+        Uses pattern matching and heuristics instead of LLM to avoid JSON parsing issues.
+        
+        Args:
+            query: User query
+            
+        Returns:
+            tuple: (query_type, parameters)
+        """
+        query_lower = query.lower()
+        
+        # Check for incident ID
+        incident_id_match = re.search(r"(INC\d{12})", query)
+        if incident_id_match:
+            return "incident_id", {"incident_id": incident_id_match.group(1)}
+            
+        # Check for date-based queries
+        if any(term in query_lower for term in ["today", "yesterday", "last week", "this week", "last month"]):
+            # Extract date
+            if "today" in query_lower:
+                date_str = "today"
+            elif "yesterday" in query_lower:
+                date_str = "yesterday"
+            elif "last week" in query_lower:
+                date_str = "last week"
+            elif "this week" in query_lower:
+                date_str = "this week"
+            elif "last month" in query_lower:
+                date_str = "last month"
+            else:
+                date_str = "today"
+                
+            # Extract status if present
+            status = None
+            status_terms = ["open", "closed", "resolved", "in progress", "pending"]
+            for term in status_terms:
+                if term in query_lower:
+                    status = term.capitalize()
+                    break
+                    
+            return "date", {"date": date_str, "status": status}
+            
+        # Check for status-based queries
+        status_terms = ["open", "closed", "resolved", "in progress", "pending"]
+        for status in status_terms:
+            if status in query_lower and ("incidents" in query_lower or "tickets" in query_lower):
+                return "status", {"status": status.capitalize()}
+                
+        # Check for assignee-based queries
+        if "assigned to" in query_lower or "working on" in query_lower:
+            # Extract assignee
+            assignee_match = re.search(r"(assigned to|working on by) (.*?)([\.\?]|$| and | or )", query_lower)
+            if assignee_match:
+                assignee = assignee_match.group(2).strip()
+                return "assignee", {"assignee": assignee}
+                
+        # Check for support group queries
+        if "support group" in query_lower or ("team" in query_lower and "incidents" in query_lower):
+            # Extract support group
+            group_match = re.search(r"(support group|team) (.*?)([\.\?]|$| and | or )", query_lower)
+            if group_match:
+                support_group = group_match.group(2).strip()
+                return "support_group", {"support_group": support_group}
+                
+        # Check for recent incidents queries
+        if "recent" in query_lower and ("incidents" in query_lower or "tickets" in query_lower):
+            days = 7  # Default
+            days_match = re.search(r"(last|past) (\d+) (days|weeks)", query_lower)
+            if days_match:
+                try:
+                    days = int(days_match.group(2))
+                    if days_match.group(3) == "weeks":
+                        days = days * 7
+                except ValueError:
+                    pass
+            return "recent", {"days": days}
+            
+        # Default to search
+        # Clean query for better search results
+        search_text = query
+        common_words = ["show", "me", "list", "get", "find", "all", "incidents", "tickets"]
+        for word in common_words:
+            search_text = re.sub(r'\b' + word + r'\b', '', search_text, flags=re.IGNORECASE)
+        search_text = search_text.strip()
+        
+        return "search", {"search_text": search_text}
+        
+    def _retrieve_cached_data(self, query_type, parameters):
+        """
+        Retrieve data from cache based on query type and parameters.
+        
+        Args:
+            query_type: Type of query
+            parameters: Query parameters
+            
+        Returns:
+            dict: Retrieved data or None if retrieval failed
+        """
+        try:
+            if query_type == "incident_id":
+                incident_id = parameters.get("incident_id")
+                if incident_id:
+                    incident = self.remedy_client.get_cached_incident(incident_id)
+                    return {
+                        "type": "incident",
+                        "data": incident
+                    }
+                    
+            elif query_type == "date":
+                date_str = parameters.get("date")
+                status = parameters.get("status")
+                if date_str:
+                    # Parse date string
+                    date_obj = self._parse_date_expression(date_str)
+                    if date_obj:
+                        incidents = self.remedy_client.get_cached_incidents_by_date(date_obj, status)
+                        return {
+                            "type": "incidents_by_date",
+                            "data": incidents,
+                            "parameters": parameters
+                        }
+                        
+            elif query_type == "status":
+                status = parameters.get("status")
+                if status:
+                    incidents = self.remedy_client.get_cached_incidents_by_status(status)
+                    return {
+                        "type": "incidents_by_status",
+                        "data": incidents,
+                        "parameters": parameters
+                    }
+                    
+            elif query_type == "assignee":
+                assignee = parameters.get("assignee")
+                if assignee:
+                    incidents = self.remedy_client.get_cached_incidents_by_assignee(assignee)
+                    return {
+                        "type": "incidents_by_assignee",
+                        "data": incidents,
+                        "parameters": parameters
+                    }
+                    
+            elif query_type == "support_group":
+                support_group = parameters.get("support_group")
+                if support_group:
+                    incidents = self.remedy_client.get_cached_incidents_by_support_group(support_group)
+                    return {
+                        "type": "incidents_by_support_group",
+                        "data": incidents,
+                        "parameters": parameters
+                    }
+                    
+            elif query_type == "recent":
+                days = parameters.get("days", 7)
+                # Recent incidents are already in cache
+                # Just filter by date
+                today = datetime.now()
+                start_date = today - timedelta(days=days)
+                
+                # Filter incidents by date
+                incidents = []
+                for incident in self.remedy_client.incidents_cache.values():
+                    if "values" in incident and "Submit Date" in incident["values"]:
+                        submit_date_str = incident["values"]["Submit Date"]
+                        try:
+                            # Parse date from string (format may vary)
+                            submit_date = datetime.strptime(submit_date_str[:10], "%Y-%m-%d")
+                            if submit_date >= start_date:
+                                incidents.append(incident)
+                        except ValueError:
+                            # Skip incidents with unparseable dates
+                            pass
+                            
+                return {
+                    "type": "recent_incidents",
+                    "data": incidents,
+                    "parameters": parameters
+                }
+                
+            elif query_type == "search":
+                search_text = parameters.get("search_text")
+                if search_text:
+                    # Use NLP processor for semantic search
+                    incidents = self.nlp_processor.search(search_text, self.remedy_client.incidents_cache)
+                    return {
+                        "type": "search_results",
+                        "data": incidents,
+                        "parameters": parameters
+                    }
+                    
+            return None
+            
+        except Exception as e:
+            logger.error(f"Error retrieving cached data: {str(e)}")
+            return None
+            
+    def _parse_date_expression(self, date_expr):
+        """
+        Parse a date expression into a datetime object.
+        
+        Args:
+            date_expr: Date expression
+            
+        Returns:
+            datetime object or None
+        """
+        today = datetime.now()
+        
+        # Check for keywords
+        if date_expr.lower() == 'today':
+            return today
+        elif date_expr.lower() == 'yesterday':
+            return today - timedelta(days=1)
+        elif date_expr.lower() == 'last week':
+            return today - timedelta(days=7)
+        elif date_expr.lower() == 'this week':
+            # Return the beginning of the current week (Monday)
+            return today - timedelta(days=today.weekday())
+        elif date_expr.lower() == 'last month':
+            # Approximate a month as 30 days
+            return today - timedelta(days=30)
+            
+        # Try to parse as YYYY-MM-DD
+        try:
+            return datetime.strptime(date_expr, "%Y-%m-%d")
+        except ValueError:
+            # Try other common formats
+            formats = [
+                "%d-%m-%Y", "%m/%d/%Y", "%d/%m/%Y", "%Y/%m/%d",
+                "%b %d %Y", "%d %b %Y", "%B %d %Y", "%d %B %Y"
+            ]
+            
+            for fmt in formats:
+                try:
+                    return datetime.strptime(date_expr, fmt)
+                except ValueError:
+                    continue
+                    
+        return None
         
     def _format_conversation_history(self):
         """
@@ -1650,18 +1870,19 @@ def main():
     print("RemedyBot - BMC Remedy Chatbot powered by Google Gemini")
     print("=" * 80)
     
-    # Get server URL and credentials
-    server_url = input("Enter Remedy Server URL [https://cmegroup-restapi.onbmc.com]: ")
-    if not server_url:
-        server_url = "https://cmegroup-restapi.onbmc.com"
-        
-    username = input("Enter Remedy Username (leave empty for prompt during login): ")
-    password = getpass.getpass("Enter Remedy Password (leave empty for prompt during login): ")
+    # Initialize chatbot with the default credentials
+    print("\nInitializing Remedy chatbot...")
+    print("Connecting to Remedy server and loading cache...")
+    chatbot = RemedyChatbot()
     
-    # Initialize chatbot
-    chatbot = RemedyChatbot(server_url, username, password)
+    # Check if cache is loaded
+    if len(chatbot.remedy_client.incidents_cache) == 0:
+        print("No cached incidents found. Fetching incidents from Remedy...")
+        chatbot.remedy_client.fetch_and_cache_all_incidents(days_back=30)
+        chatbot.nlp_processor.build_index_from_incidents(chatbot.remedy_client.incidents_cache)
     
-    print("\nInitialization complete. Type 'help' for available commands, or 'exit' to quit.")
+    print(f"\nInitialization complete. Loaded {len(chatbot.remedy_client.incidents_cache)} incidents in cache.")
+    print("Type 'help' for available commands, 'refresh cache' to update the cache, or 'exit' to quit.")
     print("You can now start chatting with RemedyBot!\n")
     
     while True:
@@ -1688,6 +1909,8 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
 
 
 
