@@ -1,257 +1,194 @@
-#!/usr/bin/env python3
-import requests
-import logging
-import os
-import sys
-import json
 import re
+import logging
+import json
 import time
-from datetime import datetime
-from urllib.parse import quote
-import vertexai
-from vertexai.generative_models import GenerationConfig, GenerativeModel
-from google.api_core.exceptions import GoogleAPICallError
+import os
+from pathlib import Path
+import pickle
+import hashlib
+from datetime import datetime, timedelta
+from collections import Counter, defaultdict
 
 # Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler("confluence_gemini.log"),
-        logging.StreamHandler(sys.stdout)
-    ]
-)
-logger = logging.getLogger("ConfluenceGemini")
-
-# Configuration
-PROJECT_ID = os.environ.get("PROJECT_ID", "prj-dv-cws-4363")
-REGION = os.environ.get("REGION", "us-central1")
-MODEL_NAME = os.environ.get("MODEL_NAME", "gemini-2.0-flash-001")
-MAX_RESULTS = int(os.environ.get("MAX_RESULTS", "25"))
+logger = logging.getLogger("TextProcessor")
 
 class HTMLFilter:
-    """Simple HTML to text converter using regex."""
-    @staticmethod
-    def clean_html(html_text):
-        """Remove HTML tags and normalize whitespace."""
-        if not html_text:
-            return ""
+    """Simple HTML filter to extract text from HTML content."""
+    
+    def __init__(self):
+        self.text = ""
+    
+    def feed(self, data):
+        """
+        Process HTML content and extract plain text.
+        
+        Args:
+            data: HTML content string
+        """
+        if not data:
+            self.text = ""
+            return
+        
         # Remove HTML tags
-        text = re.sub(r'<[^>]*>', ' ', html_text)
+        text = re.sub(r'<[^>]*>', ' ', data)
+        # Replace HTML entities
+        text = re.sub(r'&[a-zA-Z]+;', ' ', text)
         # Replace multiple whitespace with single space
         text = re.sub(r'\s+', ' ', text).strip()
-        # Handle common HTML entities
-        text = text.replace('&nbsp;', ' ').replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>')
-        return text
+        
+        self.text = text
 
-class ConfluenceClient:
-    """Client for Confluence REST API operations."""
-    
-    def __init__(self, base_url, username, api_token):
-        """
-        Initialize the Confluence client with authentication details.
-        
-        Args:
-            base_url: The base URL of the Confluence instance
-            username: The username for authentication
-            api_token: The API token for authentication
-        """
-        self.base_url = base_url.rstrip('/')
-        self.auth = (username, api_token)
-        self.headers = {
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-        }
-        self.session = requests.Session()
-        logger.info(f"Initialized Confluence client for {self.base_url}")
-    
-    def test_connection(self):
-        """Test the connection to Confluence API."""
-        try:
-            logger.info("Testing connection to Confluence...")
-            response = self.session.get(
-                f"{self.base_url}/rest/api/content",
-                auth=self.auth,
-                headers=self.headers,
-                params={"limit": 1},
-                verify=False  # Setting SSL verify to False as requested
-            )
-            response.raise_for_status()
-            
-            if response.ok:
-                logger.info("Connection successful!")
-                return True
-            return False
-        except Exception as e:
-            logger.error(f"Connection test failed: {str(e)}")
-            return False
-    
-    def get_content_by_id(self, content_id, expand=None):
-        """
-        Get content by ID with optional expansion parameters.
-        
-        Args:
-            content_id: The ID of the content to retrieve
-            expand: Comma-separated list of properties to expand
-        """
-        try:
-            params = {}
-            if expand:
-                params["expand"] = expand
-            
-            logger.info(f"Fetching content with ID: {content_id}")
-            response = self.session.get(
-                f"{self.base_url}/rest/api/content/{content_id}",
-                auth=self.auth,
-                headers=self.headers,
-                params=params,
-                verify=False
-            )
-            response.raise_for_status()
-            
-            return response.json()
-        except Exception as e:
-            logger.error(f"Error retrieving content: {str(e)}")
-            return None
-    
-    def get_page_content(self, page_id):
-        """
-        Get the content of a page in a suitable format for NLP.
-        
-        Args:
-            page_id: The ID of the page
-        """
-        try:
-            page = self.get_content_by_id(page_id, expand="body.storage,metadata.labels")
-            if not page:
-                return None
-            
-            # Extract basic metadata
-            metadata = {
-                "id": page.get("id"),
-                "title": page.get("title"),
-                "type": page.get("type"),
-                "url": f"{self.base_url}/wiki/spaces/{page.get('_expandable', {}).get('space', '').split('/')[-1]}/pages/{page.get('id')}",
-                "labels": [label.get("name") for label in page.get("metadata", {}).get("labels", {}).get("results", [])]
-            }
-            
-            # Get raw content
-            content = page.get("body", {}).get("storage", {}).get("value", "")
-            
-            # Process HTML content to plain text
-            plain_text = HTMLFilter.clean_html(content)
-            
-            return {
-                "metadata": metadata,
-                "content": plain_text,
-                "raw_html": content
-            }
-        except Exception as e:
-            logger.error(f"Error processing page content: {str(e)}")
-            return None
-    
-    def search_content(self, query, content_type="page", limit=MAX_RESULTS):
-        """
-        Search for content using Confluence's built-in search.
-        
-        Args:
-            query: Search query
-            content_type: Type of content to search for
-            limit: Maximum number of results to return
-            
-        Returns:
-            List of search results
-        """
-        try:
-            # Create CQL query
-            cql = f'type={content_type} AND text ~ "{query}"'
-            
-            logger.info(f"Searching with CQL: {cql}")
-            response = self.session.get(
-                f"{self.base_url}/rest/api/content/search",
-                auth=self.auth,
-                headers=self.headers,
-                params={
-                    "cql": cql,
-                    "limit": limit
-                },
-                verify=False
-            )
-            response.raise_for_status()
-            
-            search_results = response.json()
-            logger.info(f"Search returned {len(search_results.get('results', []))} results")
-            
-            # Get full content for each result
-            detailed_results = []
-            for result in search_results.get("results", []):
-                content = self.get_page_content(result.get("id"))
-                if content:
-                    detailed_results.append(content)
-            
-            return detailed_results
-        except Exception as e:
-            logger.error(f"Error searching content: {str(e)}")
-            return []
 
 class TextProcessor:
-    """Class for simple text processing without external dependencies."""
+    """Simple text processing class without NLTK dependencies."""
     
-    @staticmethod
-    def extract_keywords(text, top_n=5):
+    def __init__(self):
+        """Initialize text processing components."""
+        self.stop_words = {
+            'the', 'is', 'in', 'to', 'and', 'of', 'a', 'for', 'on', 'with',
+            'this', 'that', 'it', 'at', 'from', 'by', 'be', 'was', 'as', 'are',
+            'have', 'had', 'has', 'not', 'but', 'what', 'all', 'were', 'when',
+            'we', 'there', 'been', 'if', 'more', 'no', 'or', 'about', 'which',
+            'their', 'will', 'one', 'would', 'so', 'you', 'an', 'they', 'these',
+            # Domain-specific stop words
+            'jira', 'confluence', 'page', 'issue', 'ticket', 'project', 'user',
+            'atlassian', 'key', 'id', 'com', 'org', 'http', 'https', 'www'
+        }
+        
+        logger.info("Initialized simple text processor (no NLTK)")
+    
+    def preprocess_text(self, text):
         """
-        Extract potential keywords from text, using simple frequency analysis.
+        Simple text preprocessing without NLTK.
+        
+        Args:
+            text: Input text to process
+            
+        Returns:
+            Dict containing processed text data
+        """
+        if not text or not isinstance(text, str):
+            return {
+                "original": "",
+                "tokens": [],
+                "filtered_tokens": [],
+                "lemmatized_tokens": [],  # Will be same as filtered_tokens
+                "stemmed_tokens": [],     # Will be same as filtered_tokens
+                "segments": [],
+                "pos_tags": []
+            }
+        
+        # Simple tokenization by splitting on whitespace and punctuation
+        tokens = re.findall(r'\b\w+\b', text.lower())
+        
+        # Remove stop words
+        filtered_tokens = [token for token in tokens if token not in self.stop_words]
+        
+        # Simple sentence segmentation
+        segments = [s.strip() for s in re.split(r'[.!?]+', text) if s.strip()]
+        
+        return {
+            "original": text,
+            "tokens": tokens,
+            "filtered_tokens": filtered_tokens,
+            "lemmatized_tokens": filtered_tokens,  # Use same as filtered tokens
+            "stemmed_tokens": filtered_tokens,     # Use same as filtered tokens
+            "segments": segments,
+            "pos_tags": []  # Empty list instead of POS tags
+        }
+    
+    def extract_keywords(self, text, top_n=10):
+        """
+        Extract the most important keywords from text without NLTK.
         
         Args:
             text: Input text
             top_n: Number of top keywords to return
             
         Returns:
-            List of keywords
+            List of top keywords
+        """
+        processed = self.preprocess_text(text)
+        
+        # Count word frequencies
+        word_freq = {}
+        for token in processed["filtered_tokens"]:
+            if token in word_freq:
+                word_freq[token] += 1
+            else:
+                word_freq[token] = 1
+        
+        # Sort by frequency
+        sorted_words = sorted(word_freq.items(), key=lambda x: x[1], reverse=True)
+        
+        # Return top N keywords
+        return [word for word, freq in sorted_words[:top_n]]
+    
+    def segment_text(self, text, max_segment_length=500, overlap=50):
+        """
+        Segment text into smaller chunks (simplified).
+        
+        Args:
+            text: Input text to segment
+            max_segment_length: Maximum character length for each segment
+            overlap: Number of characters to overlap between segments
+            
+        Returns:
+            List of text segments
         """
         if not text:
             return []
+            
+        # Simply split text by sentences (periods followed by space)
+        segments = [s.strip() for s in re.split(r'[.!?]+', text) if s.strip()]
         
-        # Convert to lowercase
-        text = text.lower()
+        result = []
+        current = ""
         
-        # Remove punctuation and split into words
-        words = re.findall(r'\b[a-z]{3,}\b', text)
+        for segment in segments:
+            if len(current) + len(segment) <= max_segment_length:
+                current += ". " + segment if current else segment
+            else:
+                if current:
+                    result.append(current)
+                    # Create overlap with previous segment
+                    if len(current) > overlap:
+                        current = current[-overlap:]
+                    else:
+                        current = ""
+                current += segment
         
-        # Remove common stop words (simplified list)
-        stop_words = {'the', 'a', 'an', 'and', 'or', 'but', 'is', 'are', 'was', 'were', 
-                     'be', 'been', 'being', 'in', 'on', 'at', 'to', 'for', 'with', 'by', 
-                     'about', 'like', 'through', 'over', 'before', 'after', 'between', 
-                     'under', 'above', 'of', 'from', 'up', 'down', 'this', 'that', 'these', 
-                     'those', 'it', 'its', 'he', 'she', 'we', 'they', 'them', 'their', 'has', 
-                     'have', 'had', 'do', 'does', 'did', 'can', 'could', 'will', 'would', 'should'}
-        
-        filtered_words = [word for word in words if word not in stop_words]
-        
-        # Count word frequencies
-        word_counts = {}
-        for word in filtered_words:
-            word_counts[word] = word_counts.get(word, 0) + 1
-        
-        # Sort by frequency
-        sorted_words = sorted(word_counts.items(), key=lambda x: x[1], reverse=True)
-        
-        # Return top N words
-        return [word for word, count in sorted_words[:top_n]]
+        if current:
+            result.append(current)
+            
+        return result
     
-    @staticmethod
-    def is_multi_part_question(question):
+    def preprocess_question(self, question):
         """
-        Detect if a question has multiple parts.
+        Preprocess a question (simplified).
         
         Args:
-            question: The question text
+            question: User question
             
         Returns:
-            Boolean indicating if it's a multi-part question
+            Dict with processed question information
         """
-        # Patterns that suggest multi-part questions
-        patterns = [
+        # Simple processing
+        processed = self.preprocess_text(question)
+        
+        # Simple question type detection
+        question_words = {"what", "who", "where", "when", "why", "how", "which", "can", "do", "is", "are", "will"}
+        tokens = question.lower().split()
+        
+        question_type = "unknown"
+        if tokens and tokens[0] in question_words:
+            question_type = tokens[0]
+        
+        # Extract keywords
+        keywords = self.extract_keywords(question, top_n=5)
+        
+        # Simple multi-part question detection
+        multi_part_patterns = [
             r'\d+\s*\.\s+',  # Numbered list (1. 2. etc)
             r'first.*?second',
             r'part\s+\d+',
@@ -262,12 +199,19 @@ class TextProcessor:
             r'\?.*?\?'  # Multiple question marks
         ]
         
-        return any(re.search(pattern, question, re.IGNORECASE) for pattern in patterns)
+        is_multi_part = any(re.search(pattern, question, re.IGNORECASE) for pattern in multi_part_patterns)
+        
+        return {
+            "processed": processed,
+            "type": question_type,
+            "keywords": keywords,
+            "is_multi_part": is_multi_part,
+            "entities": []  # Empty list instead of entities
+        }
     
-    @staticmethod
-    def split_multi_part_question(question):
+    def split_multi_part_question(self, question):
         """
-        Split a multi-part question into individual questions.
+        Split a multi-part question (simplified).
         
         Args:
             question: Multi-part question
@@ -275,7 +219,7 @@ class TextProcessor:
         Returns:
             List of individual questions
         """
-        # Split by question marks
+        # Method 1: Split by question marks followed by space or sentence start
         parts = re.split(r'\?\s+', question)
         
         # Make sure each part ends with a question mark
@@ -283,307 +227,446 @@ class TextProcessor:
             if i < len(parts) - 1 and not part.endswith('?'):
                 parts[i] = part + '?'
         
-        # Filter out empty parts
+        # Filter out empty parts and strip whitespace
         parts = [part.strip() for part in parts if part.strip()]
         
-        # If no good splits, try other methods
+        # If splitting by question marks didn't work well, try numbering patterns
         if len(parts) <= 1:
-            # Try numbered patterns
+            # Match numbered patterns like "1. First question 2. Second question"
             numbered_parts = re.split(r'\d+\s*\.\s+', question)
+            
+            # Remove empty parts and strip whitespace
             numbered_parts = [part.strip() for part in numbered_parts if part.strip()]
             
             if len(numbered_parts) > 1:
                 parts = numbered_parts
         
-        # If still no success, try other delimiters
+        # If we still don't have multiple parts, try other delimiters
         if len(parts) <= 1:
-            for delimiter in [';', 'and also,', 'additionally,', 'moreover,', 'furthermore,']:
+            other_delimiters = [';', 'and also,', 'additionally,', 'moreover,', 'furthermore,']
+            for delimiter in other_delimiters:
                 if delimiter in question.lower():
                     parts = question.split(delimiter)
                     parts = [part.strip() for part in parts if part.strip()]
                     break
         
-        # Default to the original question if all else fails
+        # If still no success, default to the original question
         if len(parts) <= 1:
             return [question]
         
         return parts
 
-class GeminiClient:
-    """Wrapper for interacting with Google's Gemini API."""
+
+class ContentIndex:
+    """An indexing system for content with search capabilities."""
     
-    def __init__(self):
-        """Initialize the Gemini client."""
-        vertexai.init(project=PROJECT_ID, location=REGION)
-        self.model = GenerativeModel(MODEL_NAME)
-        logger.info(f"Initialized Gemini client with model {MODEL_NAME}")
-    
-    def generate_response(self, prompt, system_prompt=None, temperature=0.7, max_tokens=8192):
+    def __init__(self, index_dir=None):
         """
-        Generate a response from Gemini.
+        Initialize the content index.
         
         Args:
-            prompt: User prompt
-            system_prompt: System instructions
-            temperature: Sampling temperature (0.0 to 1.0)
-            max_tokens: Maximum tokens to generate
+            index_dir: Directory to store index files
+        """
+        self.index_dir = Path(index_dir) if index_dir else Path("./content_index")
+        self.index_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Initialize index structures
+        self.token_index = defaultdict(list)  # Maps tokens to document IDs
+        self.document_metadata = {}  # Maps document IDs to metadata
+        self.text_processor = TextProcessor()
+        
+        # Load existing index if available
+        self.load_index()
+        
+        logger.info(f"Initialized content index in {self.index_dir}")
+    
+    def index_document(self, document):
+        """
+        Index a document for search.
+        
+        Args:
+            document: Document dict with metadata, content, etc.
             
         Returns:
-            Generated response text
+            True if successful, False otherwise
         """
         try:
-            logger.info(f"Generating response with temperature {temperature}")
+            # Extract document ID and content
+            metadata = document.get("metadata", {})
+            doc_id = metadata.get("id")
+            content = document.get("content", "")
+            source_type = document.get("source_type", "unknown")
             
-            # Configure generation parameters
-            generation_config = GenerationConfig(
-                temperature=temperature,
-                top_p=0.95,
-                max_output_tokens=max_tokens,
-            )
+            if not doc_id or not content:
+                logger.warning("Document missing ID or content, skipping indexing")
+                return False
             
-            # Combine prompts if system prompt is provided
-            full_prompt = prompt
-            if system_prompt:
-                full_prompt = f"{system_prompt}\n\n{prompt}"
+            # Process the content
+            processed = self.text_processor.preprocess_text(content)
             
-            # Generate response with streaming for better user experience
-            response_text = ""
-            print("Generating response", end="")
-            for chunk in self.model.generate_content(
-                full_prompt,
-                generation_config=generation_config,
-                stream=True,
-            ):
-                if chunk.candidates and chunk.candidates[0].text:
-                    response_text += chunk.candidates[0].text
-                    print(".", end="", flush=True)  # Show progress
+            # Store metadata
+            self.document_metadata[doc_id] = {
+                "id": doc_id,
+                "title": metadata.get("title", "Untitled"),
+                "url": metadata.get("url", ""),
+                "source_type": source_type,
+                "last_indexed": datetime.now().isoformat()
+            }
             
-            print()  # New line after progress dots
+            # Index tokens
+            for token in processed["lemmatized_tokens"]:
+                if doc_id not in self.token_index[token]:
+                    self.token_index[token].append(doc_id)
             
-            logger.info(f"Response length: {len(response_text)} characters")
-            return response_text
+            # Save the index
+            self.save_index()
+            
+            logger.info(f"Indexed document: {doc_id}")
+            return True
         except Exception as e:
-            logger.error(f"Error generating response: {str(e)}")
-            return f"Error generating response: {str(e)}"
+            logger.error(f"Error indexing document: {str(e)}")
+            return False
     
-    def build_system_prompt(self, context_docs=None):
+    def search(self, query, max_results=10):
         """
-        Build a comprehensive system prompt for Gemini.
+        Search for documents matching the query.
         
         Args:
-            context_docs: List of documents to include as context
+            query: Search query
+            max_results: Maximum number of results to return
             
         Returns:
-            System prompt string
+            List of document IDs sorted by relevance
         """
-        system_prompt = """You are a highly knowledgeable and professional AI assistant that specializes in providing accurate information from a company's Confluence knowledge base. Your responses should be:
-
-1. PRECISE AND ACCURATE: Always base your answers strictly on the provided Confluence documents. If the information isn't in the provided context, clearly state that you don't have that specific information.
-
-2. PROFESSIONAL BUT FRIENDLY: Maintain a professional tone that would be appropriate in a corporate environment, while still being approachable and helpful.
-
-3. WELL-STRUCTURED: For complex responses, use appropriate formatting with headings, bullet points, or numbered lists to improve readability. Use tables for tabular data.
-
-4. CONTEXTUALLY AWARE: If you need clarification to provide a better answer, politely ask follow-up questions to better understand the user's needs.
-
-5. SOURCE-TRANSPARENT: Always include references to the specific Confluence pages you used to answer the question. Include the exact page titles and URLs at the end of your response.
-
-When responding to technical questions:
-- Be precise with technical terminology
-- Include code snippets when relevant
-- Explain complex concepts clearly
-
-When handling data from tables:
-- Present numerical data clearly, using markdown tables if appropriate
-- Explain what the data means in business terms
-
-When images are referenced in the context:
-- Clearly describe what information the image contains
-- Explain the relevance of the image to the question
-
-If the question seems ambiguous or could have multiple interpretations:
-- Consider the most likely interpretation based on the available context
-- If necessary, provide answers to multiple interpretations
-- Politely ask for clarification
-
-If you don't have enough information to fully answer the question:
-- Clearly state what you do know based on the provided context
-- Explain what additional information would be needed
-- Suggest which Confluence spaces might contain the relevant information
-
-FORMAT YOUR RESPONSES:
-1. Start with a direct answer to the question
-2. Follow with supporting details, explanations, or elaborations
-3. For complex topics, use appropriate headings and structured formatting
-4. End with source references listing the Confluence pages you used
-
-Remember that you are assisting with company-internal information. Your responses should be helpful for employees trying to find and understand information in their company's knowledge base.
-"""
+        if not self.token_index:
+            logger.warning("Index is empty, cannot search")
+            return []
         
-        # Add context documents if provided
-        if context_docs and len(context_docs) > 0:
-            context_text = "\n\n### CONTEXT DOCUMENTS ###\n\n"
-            
-            for i, doc in enumerate(context_docs):
-                metadata = doc.get("metadata", {})
-                title = metadata.get("title", "Untitled Document")
-                url = metadata.get("url", "")
-                content = doc.get("content", "")
-                
-                # Truncate content if too long - Gemini has context limits
-                if len(content) > 10000:
-                    content = content[:10000] + "... [content truncated]"
-                
-                context_text += f"[DOCUMENT {i+1}]: {title}\n"
-                context_text += f"URL: {url}\n"
-                context_text += f"CONTENT: {content}\n\n"
-            
-            system_prompt += context_text
+        # Process the query
+        processed = self.text_processor.preprocess_text(query)
+        search_tokens = processed["lemmatized_tokens"]
         
-        return system_prompt
-
-class ConfluenceGeminiBot:
-    """Main class that integrates Confluence content with Gemini for answering questions."""
+        if not search_tokens:
+            logger.warning("No valid search tokens in query")
+            return []
+        
+        # Score documents based on token matches
+        scores = defaultdict(int)
+        
+        # Weight different tokens
+        for token in search_tokens:
+            matching_docs = self.token_index.get(token, [])
+            
+            for doc_id in matching_docs:
+                # Increase score for each matching token
+                scores[doc_id] += 1
+        
+        # Sort by score (descending)
+        sorted_results = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+        
+        # Return top results
+        top_docs = [doc_id for doc_id, score in sorted_results[:max_results]]
+        
+        logger.info(f"Search found {len(top_docs)} results for query: {query}")
+        return top_docs
     
-    def __init__(self, confluence_url, username, api_token):
+    def get_document_metadata(self, doc_id):
         """
-        Initialize the bot with Confluence credentials.
+        Get metadata for a document.
         
         Args:
-            confluence_url: Base URL of Confluence instance
-            username: Confluence username
-            api_token: Confluence API token
-        """
-        self.confluence = ConfluenceClient(confluence_url, username, api_token)
-        self.text_processor = TextProcessor()
-        self.gemini = GeminiClient()
-        
-        # Test connection
-        self.confluence.test_connection()
-        logger.info("Initialized ConfluenceGeminiBot")
-    
-    def answer_question(self, question, temperature=0.7):
-        """
-        Answer a question using Confluence content and Gemini.
-        
-        Args:
-            question: User's question
-            temperature: Temperature for Gemini response generation
+            doc_id: Document ID
             
         Returns:
-            Answer from Gemini
+            Document metadata or None if not found
         """
-        logger.info(f"Answering question: {question}")
-        
-        # Check if it's a multi-part question
-        if self.text_processor.is_multi_part_question(question):
-            logger.info("Detected multi-part question, splitting into parts")
-            question_parts = self.text_processor.split_multi_part_question(question)
-            
-            if len(question_parts) > 1:
-                logger.info(f"Split into {len(question_parts)} parts: {question_parts}")
-                
-                # Process each part separately
-                responses = []
-                for i, part in enumerate(question_parts):
-                    logger.info(f"Processing question part {i+1}: {part}")
-                    part_response = self._process_single_question(part, temperature)
-                    responses.append(f"Part {i+1}: {part}\n\n{part_response}")
-                
-                # Combine responses
-                combined_response = "\n\n" + "-" * 30 + "\n\n".join(responses)
-                return combined_response
-        
-        # For single questions or if splitting failed
-        return self._process_single_question(question, temperature)
+        return self.document_metadata.get(doc_id)
     
-    def _process_single_question(self, question, temperature=0.7):
+    def save_index(self):
+        """Save the index to disk."""
+        try:
+            # Save token index
+            token_index_path = self.index_dir / "token_index.pkl"
+            with open(token_index_path, 'wb') as f:
+                pickle.dump(dict(self.token_index), f)
+            
+            # Save document metadata
+            metadata_path = self.index_dir / "document_metadata.pkl"
+            with open(metadata_path, 'wb') as f:
+                pickle.dump(self.document_metadata, f)
+            
+            logger.info(f"Saved index with {len(self.token_index)} tokens and {len(self.document_metadata)} documents")
+            return True
+        except Exception as e:
+            logger.error(f"Error saving index: {str(e)}")
+            return False
+    
+    def load_index(self):
+        """Load the index from disk."""
+        try:
+            # Load token index
+            token_index_path = self.index_dir / "token_index.pkl"
+            if token_index_path.exists():
+                with open(token_index_path, 'rb') as f:
+                    self.token_index = defaultdict(list, pickle.load(f))
+            
+            # Load document metadata
+            metadata_path = self.index_dir / "document_metadata.pkl"
+            if metadata_path.exists():
+                with open(metadata_path, 'rb') as f:
+                    self.document_metadata = pickle.load(f)
+            
+            logger.info(f"Loaded index with {len(self.token_index)} tokens and {len(self.document_metadata)} documents")
+            return True
+        except Exception as e:
+            logger.error(f"Error loading index: {str(e)}")
+            self.token_index = defaultdict(list)
+            self.document_metadata = {}
+            return False
+    
+    def clear_index(self):
+        """Clear the index."""
+        self.token_index = defaultdict(list)
+        self.document_metadata = {}
+        
+        # Remove index files
+        token_index_path = self.index_dir / "token_index.pkl"
+        metadata_path = self.index_dir / "document_metadata.pkl"
+        
+        if token_index_path.exists():
+            os.remove(token_index_path)
+        
+        if metadata_path.exists():
+            os.remove(metadata_path)
+        
+        logger.info("Index cleared")
+        return True
+
+
+class Cache:
+    """Advanced caching system with flexible expiration policies."""
+    
+    def __init__(self, cache_dir=None, default_expiry=86400):
         """
-        Process a single question.
+        Initialize the cache system.
         
         Args:
-            question: Question to answer
-            temperature: Temperature for response generation
+            cache_dir: Directory to store cache files
+            default_expiry: Default expiry time in seconds (24 hours)
+        """
+        self.cache_dir = Path(cache_dir) if cache_dir else Path("./enhanced_cache")
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self.default_expiry = default_expiry
+        self.memory_cache = {}
+        self.metadata = {}
+        self.metadata_file = self.cache_dir / "metadata.pkl"
+        
+        # Load metadata if it exists
+        self.load_metadata()
+        
+        logger.info(f"Initialized enhanced cache in {self.cache_dir}")
+    
+    def get_cache_path(self, key):
+        """Get the file path for a cache item."""
+        hashed_key = hashlib.md5(key.encode()).hexdigest()
+        return self.cache_dir / f"{hashed_key}.pkl"
+    
+    def is_cache_valid(self, key):
+        """Check if a cache item exists and is still valid (not expired)."""
+        # Check memory cache first
+        if key in self.memory_cache:
+            # Check if expired
+            metadata = self.metadata.get(key, {})
+            expiry_time = metadata.get("expiry_time", 0)
+            
+            if expiry_time == 0 or time.time() < expiry_time:
+                return True
+            else:
+                # Expired, remove from memory cache
+                del self.memory_cache[key]
+        
+        # Check file cache
+        cache_path = self.get_cache_path(key)
+        if not cache_path.exists():
+            return False
+        
+        # Check if expired based on metadata
+        metadata = self.metadata.get(key, {})
+        expiry_time = metadata.get("expiry_time", 0)
+        
+        if expiry_time == 0:
+            # No expiry time, check file modification time
+            mtime = cache_path.stat().st_mtime
+            if time.time() - mtime > self.default_expiry:
+                return False
+            return True
+        
+        # Check if expired based on expiry time
+        return time.time() < expiry_time
+    
+    def get(self, key, default=None):
+        """
+        Get a value from cache.
+        
+        Args:
+            key: Cache key
+            default: Default value if key not found
             
         Returns:
-            Answer to the question
+            Cached value or default if not found or expired
         """
-        # Extract keywords for better search
-        keywords = self.text_processor.extract_keywords(question)
-        logger.info(f"Extracted keywords: {keywords}")
+        if not self.is_cache_valid(key):
+            return default
         
-        # Create search query - use either keywords or original question
-        search_query = " ".join(keywords) if keywords else question
-        logger.info(f"Search query: {search_query}")
+        # Try memory cache first
+        if key in self.memory_cache:
+            logger.debug(f"Cache hit (memory): {key}")
+            return self.memory_cache[key]
         
-        # Search for relevant content using Confluence's built-in search
-        relevant_docs = self.confluence.search_content(search_query)
-        
-        if not relevant_docs:
-            logger.warning(f"No relevant documents found for question: {question}")
-            return "I couldn't find any information in the Confluence knowledge base that answers your question. Could you rephrase your question or provide more details?"
-        
-        # Prepare context for Gemini
-        logger.info(f"Found {len(relevant_docs)} relevant documents for the question")
-        
-        # Build system prompt with context
-        system_prompt = self.gemini.build_system_prompt(context_docs=relevant_docs)
-        
-        # Generate response
-        response = self.gemini.generate_response(
-            prompt=question,
-            system_prompt=system_prompt,
-            temperature=temperature
-        )
-        
-        return response
+        # Try file cache
+        cache_path = self.get_cache_path(key)
+        try:
+            with open(cache_path, 'rb') as f:
+                value = pickle.load(f)
+                
+                # Update memory cache
+                self.memory_cache[key] = value
+                
+                logger.debug(f"Cache hit (file): {key}")
+                return value
+        except Exception as e:
+            logger.error(f"Error reading cache for {key}: {str(e)}")
+            return default
     
-    def interactive_session(self):
-        """Start an interactive Q&A session in the console."""
-        print("\n=== Confluence Gemini Bot ===")
-        print("Type 'exit' or 'quit' to end the session.")
+    def set(self, key, value, expiry=None, metadata=None):
+        """
+        Store a value in cache.
         
-        while True:
-            try:
-                question = input("\nYour question: ")
-                
-                if question.lower() in ['exit', 'quit']:
-                    print("Goodbye!")
-                    break
-                
-                # Process the question
-                print("\nSearching Confluence...")
-                answer = self.answer_question(question)
-                
-                print("\nAnswer:")
-                print("=" * 80)
-                print(answer)
-                print("=" * 80)
-            except KeyboardInterrupt:
-                print("\nSession interrupted. Goodbye!")
-                break
-            except Exception as e:
-                logger.error(f"Error in interactive session: {str(e)}")
-                print(f"An error occurred: {str(e)}")
-
-# Main function to run the bot
-def main():
-    """Main function to run the application."""
-    # Configuration
-    confluence_url = os.environ.get("CONFLUENCE_URL", "https://your-company.atlassian.net")
-    username = os.environ.get("CONFLUENCE_USERNAME", "your.email@company.com")
-    api_token = os.environ.get("CONFLUENCE_API_TOKEN", "your-api-token")
+        Args:
+            key: Cache key
+            value: Value to cache
+            expiry: Expiry time in seconds (None for default)
+            metadata: Additional metadata to store
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            # Calculate expiry time
+            expiry_time = 0
+            if expiry is not None:
+                expiry_time = time.time() + expiry
+            elif self.default_expiry > 0:
+                expiry_time = time.time() + self.default_expiry
+            
+            # Update metadata
+            item_metadata = metadata or {}
+            item_metadata["expiry_time"] = expiry_time
+            item_metadata["cached_at"] = time.time()
+            self.metadata[key] = item_metadata
+            
+            # Update memory cache
+            self.memory_cache[key] = value
+            
+            # Update file cache
+            cache_path = self.get_cache_path(key)
+            with open(cache_path, 'wb') as f:
+                pickle.dump(value, f)
+            
+            # Save metadata
+            self.save_metadata()
+            
+            logger.debug(f"Cached: {key}")
+            return True
+        except Exception as e:
+            logger.error(f"Error writing cache for {key}: {str(e)}")
+            return False
     
-    # Initialize the bot
-    try:
-        print("Initializing Confluence Gemini Bot...")
-        bot = ConfluenceGeminiBot(confluence_url, username, api_token)
+    def delete(self, key):
+        """
+        Delete a cache item.
         
-        # Start interactive session
-        bot.interactive_session()
-    except Exception as e:
-        logger.error(f"Error initializing bot: {str(e)}")
-        print(f"Error: {str(e)}")
-
-if __name__ == "__main__":
-    main()
+        Args:
+            key: Cache key
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            # Remove from memory cache
+            if key in self.memory_cache:
+                del self.memory_cache[key]
+            
+            # Remove from metadata
+            if key in self.metadata:
+                del self.metadata[key]
+                self.save_metadata()
+            
+            # Remove from file cache
+            cache_path = self.get_cache_path(key)
+            if cache_path.exists():
+                os.remove(cache_path)
+            
+            logger.debug(f"Deleted from cache: {key}")
+            return True
+        except Exception as e:
+            logger.error(f"Error deleting cache for {key}: {str(e)}")
+            return False
+    
+    def clear(self, pattern=None):
+        """
+        Clear cache items.
+        
+        Args:
+            pattern: Regex pattern to match keys (None for all)
+            
+        Returns:
+            Number of items cleared
+        """
+        try:
+            count = 0
+            keys_to_delete = []
+            
+            # Find keys to delete
+            if pattern:
+                regex = re.compile(pattern)
+                for key in self.metadata:
+                    if regex.search(key):
+                        keys_to_delete.append(key)
+            else:
+                keys_to_delete = list(self.metadata.keys())
+            
+            # Delete each key
+            for key in keys_to_delete:
+                if self.delete(key):
+                    count += 1
+            
+            logger.info(f"Cleared {count} cache items")
+            return count
+        except Exception as e:
+            logger.error(f"Error clearing cache: {str(e)}")
+            return 0
+    
+    def save_metadata(self):
+        """Save metadata to disk."""
+        try:
+            with open(self.metadata_file, 'wb') as f:
+                pickle.dump(self.metadata, f)
+            return True
+        except Exception as e:
+            logger.error(f"Error saving metadata: {str(e)}")
+            return False
+    
+    def load_metadata(self):
+        """Load metadata from disk."""
+        try:
+            if self.metadata_file.exists():
+                with open(self.metadata_file, 'rb') as f:
+                    self.metadata = pickle.load(f)
+                logger.info(f"Loaded cache metadata with {len(self.metadata)} entries")
+                return True
+            return False
+        except Exception as e:
+            logger.error(f"Error loading metadata: {str(e)}")
+            self.metadata = {}
+            return False
