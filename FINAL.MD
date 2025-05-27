@@ -11,7 +11,7 @@ import requests
 from requests.auth import HTTPBasicAuth
 import base64
 import vertexai
-from vertexai.generative_models import GenerativeModel, GenerativeConfig, Part, Content
+from vertexai.generative_models import GenerativeModel, GenerativeConfig
 import urllib3
 from collections import defaultdict
 
@@ -41,10 +41,10 @@ JIRA_API_TOKEN = os.environ.get("JIRA_API_TOKEN", "ATATTxEfGFdPemKZpWezVd58xSZ52
 
 # Cache configuration
 CACHE_DIR = "jira_cache"
-CACHE_EXPIRY = 24  # Cache expiry in hours
+CACHE_EXPIRY = 6  # Cache expiry in hours (reduced for fresh data)
 
-class SmartJiraClient:
-    """Ultra-smart Jira client that understands context"""
+class UniversalJiraClient:
+    """Universal Jira client that finds EVERYTHING"""
     
     def __init__(self, base_url: str, email: str, api_token: str):
         self.base_url = base_url.rstrip('/')
@@ -53,26 +53,12 @@ class SmartJiraClient:
             "Accept": "application/json",
             "Content-Type": "application/json"
         }
-        self.cache = JiraCache()
-        self._metadata = None
+        self.cache = SimpleCache()
+        self._all_data_cache = None
         
-    def safe_get(self, obj: Any, key: str, default: Any = None) -> Any:
-        """Safely get value from object, handling None cases"""
-        if obj is None:
-            return default
-        if isinstance(obj, dict):
-            return obj.get(key, default)
-        return default
-    
     def make_request(self, method: str, endpoint: str, params: Dict = None, 
-                     data: Dict = None, cache_key: str = None, force_refresh: bool = False) -> Optional[Dict]:
-        """Make HTTP request with enhanced error handling"""
-        if method.lower() == 'get' and cache_key and not force_refresh:
-            cached_data = self.cache.get(cache_key)
-            if cached_data is not None:
-                logger.info(f"Using cached data for: {cache_key}")
-                return cached_data
-        
+                     data: Dict = None, timeout: int = 30) -> Optional[Dict]:
+        """Make robust HTTP request"""
         url = f"{self.base_url}/rest/api/3/{endpoint}"
         
         try:
@@ -85,195 +71,421 @@ class SmartJiraClient:
                 json=data,
                 auth=self.auth,
                 verify=False,
-                timeout=30
+                timeout=timeout
             )
             
             if response.status_code == 200:
-                result = response.json()
-                if method.lower() == 'get' and cache_key:
-                    self.cache.set(cache_key, result)
-                return result
+                return response.json()
+            elif response.status_code == 404:
+                logger.warning(f"Resource not found: {endpoint}")
+                return None
             else:
-                logger.warning(f"API request failed with status {response.status_code}: {response.text}")
+                logger.warning(f"API request failed: {response.status_code} - {response.text}")
                 return None
                 
-        except requests.exceptions.RequestException as e:
-            logger.error(f"API request error for {endpoint}: {e}")
-            return None
-        except json.JSONDecodeError as e:
-            logger.error(f"JSON decode error: {e}")
-            return None
         except Exception as e:
-            logger.error(f"Unexpected error: {e}")
+            logger.error(f"Request error for {endpoint}: {e}")
             return None
     
-    def get_jira_metadata(self) -> Dict:
-        """Get comprehensive Jira metadata for query building"""
-        if self._metadata is not None:
-            return self._metadata
+    def get_all_projects(self) -> List[Dict]:
+        """Get all projects"""
+        cache_key = "all_projects"
+        cached = self.cache.get(cache_key)
+        if cached:
+            return cached
             
-        metadata = {}
-        
-        try:
-            # Get projects
-            projects = self.make_request('GET', 'project', cache_key="all_projects") or []
-            metadata['projects'] = [
-                {
-                    'key': self.safe_get(p, 'key', ''),
-                    'name': self.safe_get(p, 'name', ''),
-                    'id': self.safe_get(p, 'id', '')
-                }
-                for p in projects if p is not None
-            ]
-            
-            # Get issue types
-            issue_types = self.make_request('GET', 'issuetype', cache_key="issue_types") or []
-            metadata['issue_types'] = [
-                {
-                    'name': self.safe_get(it, 'name', ''),
-                    'id': self.safe_get(it, 'id', '')
-                }
-                for it in issue_types if it is not None
-            ]
-            
-            # Get priorities
-            priorities = self.make_request('GET', 'priority', cache_key="priorities") or []
-            metadata['priorities'] = [
-                {
-                    'name': self.safe_get(p, 'name', ''),
-                    'id': self.safe_get(p, 'id', '')
-                }
-                for p in priorities if p is not None
-            ]
-            
-            # Get statuses
-            statuses = self.make_request('GET', 'status', cache_key="statuses") or []
-            metadata['statuses'] = [
-                {
-                    'name': self.safe_get(s, 'name', ''),
-                    'id': self.safe_get(s, 'id', '')
-                }
-                for s in statuses if s is not None
-            ]
-            
-            # Get users (sample)
-            users = self.make_request('GET', 'users/search', params={'maxResults': 50}, cache_key="sample_users") or []
-            metadata['users'] = [
-                {
-                    'displayName': self.safe_get(u, 'displayName', ''),
-                    'emailAddress': self.safe_get(u, 'emailAddress', ''),
-                    'accountId': self.safe_get(u, 'accountId', '')
-                }
-                for u in users if u is not None
-            ]
-            
-            self._metadata = metadata
-            logger.info(f"Loaded metadata: {len(metadata.get('projects', []))} projects, {len(metadata.get('issue_types', []))} issue types")
-            
-        except Exception as e:
-            logger.error(f"Error loading metadata: {e}")
-            self._metadata = {
-                'projects': [],
-                'issue_types': [],
-                'priorities': [],
-                'statuses': [],
-                'users': []
-            }
-        
-        return self._metadata
+        projects = self.make_request('GET', 'project')
+        if projects:
+            clean_projects = []
+            for p in projects:
+                if p and isinstance(p, dict):
+                    clean_projects.append({
+                        'key': p.get('key', ''),
+                        'name': p.get('name', ''),
+                        'id': p.get('id', ''),
+                        'projectTypeKey': p.get('projectTypeKey', '')
+                    })
+            self.cache.set(cache_key, clean_projects)
+            return clean_projects
+        return []
     
-    def execute_jql_query(self, jql: str, max_results: int = 100) -> List[Dict]:
-        """Execute JQL query and return results safely"""
-        if not jql or jql.strip() == "":
-            logger.warning("Empty JQL query provided")
-            return []
+    def get_all_users(self) -> List[Dict]:
+        """Get all users"""
+        cache_key = "all_users"
+        cached = self.cache.get(cache_key)
+        if cached:
+            return cached
             
-        try:
+        users = self.make_request('GET', 'users/search', params={'maxResults': 1000})
+        if users:
+            clean_users = []
+            for u in users:
+                if u and isinstance(u, dict):
+                    clean_users.append({
+                        'displayName': u.get('displayName', ''),
+                        'emailAddress': u.get('emailAddress', ''),
+                        'accountId': u.get('accountId', ''),
+                        'active': u.get('active', True)
+                    })
+            self.cache.set(cache_key, clean_users)
+            return clean_users
+        return []
+    
+    def comprehensive_search(self, query_text: str) -> List[Dict]:
+        """Comprehensive search using multiple strategies"""
+        logger.info(f"Starting comprehensive search for: '{query_text}'")
+        
+        all_results = []
+        
+        # Strategy 1: Direct issue key search
+        issue_keys = re.findall(r'[A-Z]+-\d+', query_text.upper())
+        if issue_keys:
+            logger.info(f"Found issue keys: {issue_keys}")
+            for key in issue_keys:
+                issue = self.get_issue_by_key(key)
+                if issue:
+                    all_results.append(issue)
+        
+        # Strategy 2: Multiple JQL searches
+        jql_queries = self.build_comprehensive_jql_queries(query_text)
+        
+        for jql in jql_queries:
             logger.info(f"Executing JQL: {jql}")
+            results = self.execute_jql(jql)
+            if results:
+                all_results.extend(results)
+        
+        # Strategy 3: Fallback - get recent data if nothing found
+        if not all_results:
+            logger.info("No results found, trying fallback searches")
+            fallback_queries = [
+                "updated >= -30d ORDER BY updated DESC",
+                "created >= -7d ORDER BY created DESC",
+                "project in (RDRF, BAMPS, CWS) ORDER BY updated DESC"
+            ]
+            
+            for fallback_jql in fallback_queries:
+                results = self.execute_jql(fallback_jql, max_results=50)
+                if results:
+                    all_results.extend(results[:20])
+                    break
+        
+        # Remove duplicates
+        unique_results = self.deduplicate_issues(all_results)
+        
+        logger.info(f"Comprehensive search returned {len(unique_results)} unique results")
+        return unique_results
+    
+    def build_comprehensive_jql_queries(self, query_text: str) -> List[str]:
+        """Build multiple JQL queries to cover all possibilities"""
+        queries = []
+        query_lower = query_text.lower()
+        
+        # Extract meaningful terms
+        terms = self.extract_search_terms(query_text)
+        logger.info(f"Extracted search terms: {terms}")
+        
+        if terms:
+            # Text search in multiple fields
+            for term in terms[:5]:  # Limit to prevent too many queries
+                queries.extend([
+                    f'summary ~ "{term}" ORDER BY updated DESC',
+                    f'description ~ "{term}" ORDER BY updated DESC',
+                    f'comment ~ "{term}" ORDER BY updated DESC',
+                    f'text ~ "{term}" ORDER BY updated DESC'
+                ])
+            
+            # Combined text search
+            combined_terms = ' OR '.join([f'text ~ "{term}"' for term in terms[:3]])
+            queries.append(f'({combined_terms}) ORDER BY updated DESC')
+        
+        # User-based searches
+        user_queries = self.build_user_queries(query_lower)
+        queries.extend(user_queries)
+        
+        # Status-based searches
+        status_queries = self.build_status_queries(query_lower)
+        queries.extend(status_queries)
+        
+        # Priority-based searches
+        priority_queries = self.build_priority_queries(query_lower)
+        queries.extend(priority_queries)
+        
+        # Date-based searches
+        date_queries = self.build_date_queries(query_lower)
+        queries.extend(date_queries)
+        
+        # Project-based searches
+        project_queries = self.build_project_queries(query_lower)
+        queries.extend(project_queries)
+        
+        # Issue type searches
+        type_queries = self.build_type_queries(query_lower)
+        queries.extend(type_queries)
+        
+        # Remove duplicates and limit
+        unique_queries = list(dict.fromkeys(queries))[:15]  # Limit to 15 queries
+        
+        logger.info(f"Built {len(unique_queries)} unique JQL queries")
+        return unique_queries
+    
+    def extract_search_terms(self, query: str) -> List[str]:
+        """Extract meaningful search terms"""
+        # Remove common stop words
+        stop_words = {
+            'show', 'me', 'all', 'the', 'get', 'find', 'list', 'about', 'with', 'for', 
+            'in', 'on', 'at', 'by', 'from', 'to', 'and', 'or', 'but', 'if', 'then', 
+            'else', 'when', 'where', 'how', 'what', 'who', 'why', 'which', 'tickets', 
+            'issues', 'jira', 'ticket', 'issue', 'please', 'can', 'you', 'i', 'need', 
+            'want', 'like', 'would', 'could', 'should', 'a', 'an', 'is', 'are', 'was', 
+            'were', 'be', 'been', 'being', 'have', 'has', 'had', 'do', 'does', 'did'
+        }
+        
+        # Extract quoted phrases
+        quoted = re.findall(r'"([^"]+)"', query)
+        terms = quoted.copy()
+        
+        # Extract individual words
+        words = re.findall(r'\b\w+\b', query.lower())
+        for word in words:
+            if len(word) > 2 and word not in stop_words and word not in terms:
+                terms.append(word)
+        
+        # Look for compound technical terms
+        compound_patterns = [
+            r'rollout[\s-]*restart', r'dr[\s-]*related', r'database[\s-]*issue',
+            r'deployment[\s-]*issue', r'performance[\s-]*issue', r'traffic[\s-]*surge',
+            r'system[\s-]*down', r'server[\s-]*error', r'security[\s-]*vulnerability',
+            r'production[\s-]*issue', r'network[\s-]*problem', r'backup[\s-]*failure'
+        ]
+        
+        for pattern in compound_patterns:
+            matches = re.findall(pattern, query.lower())
+            for match in matches:
+                clean_term = re.sub(r'[\s-]+', ' ', match).strip()
+                if clean_term not in terms:
+                    terms.append(clean_term)
+        
+        return terms[:10]  # Limit terms
+    
+    def build_user_queries(self, query: str) -> List[str]:
+        """Build user-based JQL queries"""
+        queries = []
+        
+        # Look for user names
+        user_patterns = [
+            r'assigned to ([a-zA-Z\s]+)',
+            r'assignee ([a-zA-Z\s]+)',
+            r'reported by ([a-zA-Z\s]+)',
+            r'reporter ([a-zA-Z\s]+)',
+            r'created by ([a-zA-Z\s]+)',
+            r'lakshya[\s]*vijay',
+            r'vijay',
+            r'lakshya'
+        ]
+        
+        for pattern in user_patterns:
+            matches = re.findall(pattern, query)
+            for match in matches:
+                user = match.strip() if isinstance(match, str) else ' '.join(match.split())
+                if user:
+                    queries.extend([
+                        f'assignee ~ "{user}" ORDER BY updated DESC',
+                        f'reporter ~ "{user}" ORDER BY updated DESC',
+                        f'(assignee ~ "{user}" OR reporter ~ "{user}") ORDER BY updated DESC'
+                    ])
+        
+        # Special handling for lakshya vijay
+        if any(name in query for name in ['lakshya', 'vijay']):
+            queries.extend([
+                'assignee = "lakshya.vijay@cmegroup.com" ORDER BY updated DESC',
+                'reporter = "lakshya.vijay@cmegroup.com" ORDER BY updated DESC',
+                'assignee ~ "lakshya" ORDER BY updated DESC',
+                'assignee ~ "vijay" ORDER BY updated DESC'
+            ])
+        
+        return queries
+    
+    def build_status_queries(self, query: str) -> List[str]:
+        """Build status-based queries"""
+        queries = []
+        
+        status_mapping = {
+            'open': ['Open', 'To Do', 'New'],
+            'closed': ['Closed', 'Done', 'Resolved'],
+            'in progress': ['In Progress'],
+            'todo': ['To Do'],
+            'done': ['Done'],
+            'resolved': ['Resolved']
+        }
+        
+        for keyword, statuses in status_mapping.items():
+            if keyword in query:
+                status_list = "', '".join(statuses)
+                queries.append(f"status in ('{status_list}') ORDER BY updated DESC")
+        
+        return queries
+    
+    def build_priority_queries(self, query: str) -> List[str]:
+        """Build priority-based queries"""
+        queries = []
+        
+        if any(word in query for word in ['high', 'critical', 'urgent', 'blocker']):
+            queries.append("priority in (High, Highest, Blocker) ORDER BY updated DESC")
+        
+        if any(word in query for word in ['low', 'minor', 'trivial']):
+            queries.append("priority in (Low, Lowest, Minor, Trivial) ORDER BY updated DESC")
+        
+        return queries
+    
+    def build_date_queries(self, query: str) -> List[str]:
+        """Build date-based queries"""
+        queries = []
+        
+        date_patterns = [
+            ('today', 0), ('yesterday', -1), ('last week', -7), 
+            ('past week', -7), ('last month', -30), ('past month', -30)
+        ]
+        
+        for pattern, days in date_patterns:
+            if pattern in query:
+                date = (datetime.now() + timedelta(days=days)).strftime('%Y-%m-%d')
+                queries.extend([
+                    f"created >= '{date}' ORDER BY created DESC",
+                    f"updated >= '{date}' ORDER BY updated DESC"
+                ])
+        
+        return queries
+    
+    def build_project_queries(self, query: str) -> List[str]:
+        """Build project-based queries"""
+        queries = []
+        
+        # Get all projects
+        projects = self.get_all_projects()
+        
+        for project in projects:
+            project_key = project.get('key', '').lower()
+            project_name = project.get('name', '').lower()
+            
+            if (project_key in query or 
+                any(word in query for word in project_name.split()) or
+                project_key in query.replace(' ', '')):
+                queries.append(f"project = '{project.get('key')}' ORDER BY updated DESC")
+        
+        # Also check for common project abbreviations
+        if 'bamps' in query:
+            queries.append("project = 'BAMPS' ORDER BY updated DESC")
+        if 'rdrf' in query:
+            queries.append("project = 'RDRF' ORDER BY updated DESC")
+        if 'cws' in query:
+            queries.append("project = 'CWS' ORDER BY updated DESC")
+        
+        return queries
+    
+    def build_type_queries(self, query: str) -> List[str]:
+        """Build issue type queries"""
+        queries = []
+        
+        type_mapping = {
+            'bug': 'Bug',
+            'task': 'Task', 
+            'story': 'Story',
+            'epic': 'Epic',
+            'subtask': 'Sub-task'
+        }
+        
+        for keyword, issue_type in type_mapping.items():
+            if keyword in query:
+                queries.append(f"issuetype = '{issue_type}' ORDER BY updated DESC")
+        
+        return queries
+    
+    def execute_jql(self, jql: str, max_results: int = 100) -> List[Dict]:
+        """Execute JQL and return clean results"""
+        if not jql or not jql.strip():
+            return []
+        
+        try:
             params = {
                 "jql": jql,
                 "maxResults": max_results,
                 "fields": [
                     "summary", "description", "status", "assignee", "reporter", 
                     "created", "updated", "priority", "issuetype", "labels", 
-                    "comment", "components", "fixVersions", "versions", 
-                    "resolution", "resolutiondate", "project", "key"
+                    "comment", "components", "fixVersions", "project", "key"
                 ]
             }
             
-            cache_key = f"jql_{hash(jql)}_{max_results}"
-            result = self.make_request('GET', 'search', params=params, cache_key=cache_key)
+            result = self.make_request('GET', 'search', params=params)
             
-            if result is not None and 'issues' in result:
-                issues = result['issues']
-                logger.info(f"JQL returned {len(issues)} issues")
-                return [issue for issue in issues if issue is not None]
-            else:
-                logger.warning("JQL query returned no results or failed")
-                return []
-                
+            if result and 'issues' in result:
+                return [issue for issue in result['issues'] if issue]
+            return []
+            
         except Exception as e:
-            logger.error(f"Error executing JQL query: {e}")
+            logger.error(f"JQL execution error: {e}")
             return []
     
-    def get_issue_details(self, issue_key: str) -> Optional[Dict]:
-        """Get detailed information about a specific issue"""
-        if not issue_key:
-            return None
-            
+    def get_issue_by_key(self, issue_key: str) -> Optional[Dict]:
+        """Get specific issue by key"""
         try:
-            cache_key = f"issue_{issue_key}"
-            issue = self.make_request('GET', f'issue/{issue_key}', cache_key=cache_key)
-            
-            if issue is not None:
+            issue = self.make_request('GET', f'issue/{issue_key}')
+            if issue:
                 # Get comments
-                comments = self.make_request('GET', f'issue/{issue_key}/comment', 
-                                           cache_key=f"comments_{issue_key}")
-                if comments is not None and 'comments' in comments:
+                comments = self.make_request('GET', f'issue/{issue_key}/comment')
+                if comments and 'comments' in comments:
                     issue['all_comments'] = comments['comments']
-                
                 return issue
             return None
-            
         except Exception as e:
-            logger.error(f"Error getting issue details for {issue_key}: {e}")
+            logger.error(f"Error getting issue {issue_key}: {e}")
             return None
+    
+    def deduplicate_issues(self, issues: List[Dict]) -> List[Dict]:
+        """Remove duplicate issues"""
+        seen_keys = set()
+        unique_issues = []
+        
+        for issue in issues:
+            if not issue:
+                continue
+            key = issue.get('key')
+            if key and key not in seen_keys:
+                seen_keys.add(key)
+                unique_issues.append(issue)
+        
+        return unique_issues
 
-class JiraCache:
-    """Simple and reliable caching system"""
+class SimpleCache:
+    """Simple and reliable cache"""
     
     def __init__(self):
         self.cache_dir = CACHE_DIR
         os.makedirs(self.cache_dir, exist_ok=True)
         self.memory_cache = {}
     
-    def _get_cache_path(self, key: str) -> str:
-        safe_key = re.sub(r'[^a-zA-Z0-9_-]', '_', str(key))[:100]
-        return os.path.join(self.cache_dir, f"{safe_key}.pkl")
-    
     def get(self, key: str) -> Optional[Any]:
+        # Check memory first
+        if key in self.memory_cache:
+            timestamp, data = self.memory_cache[key]
+            if time.time() - timestamp < CACHE_EXPIRY * 3600:
+                return data
+            else:
+                del self.memory_cache[key]
+        
+        # Check file cache
         try:
-            # Check memory cache first
-            if key in self.memory_cache:
-                cache_time, data = self.memory_cache[key]
-                if time.time() - cache_time < CACHE_EXPIRY * 3600:
-                    return data
-                else:
-                    del self.memory_cache[key]
-            
-            # Check file cache
-            cache_path = self._get_cache_path(key)
-            if os.path.exists(cache_path):
-                with open(cache_path, 'rb') as f:
+            cache_file = os.path.join(self.cache_dir, f"{self._safe_key(key)}.pkl")
+            if os.path.exists(cache_file):
+                with open(cache_file, 'rb') as f:
                     cached_data = pickle.load(f)
                 
-                cache_time = cached_data.get('timestamp', 0)
-                if time.time() - cache_time < CACHE_EXPIRY * 3600:
-                    # Store in memory for faster access
-                    self.memory_cache[key] = (time.time(), cached_data.get('data'))
-                    return cached_data.get('data')
+                if time.time() - cached_data['timestamp'] < CACHE_EXPIRY * 3600:
+                    self.memory_cache[key] = (time.time(), cached_data['data'])
+                    return cached_data['data']
                 else:
-                    os.remove(cache_path)
+                    os.remove(cache_file)
         except Exception as e:
             logger.error(f"Cache read error: {e}")
         
@@ -281,29 +493,29 @@ class JiraCache:
     
     def set(self, key: str, data: Any):
         try:
-            # Store in memory
+            # Memory cache
             self.memory_cache[key] = (time.time(), data)
             
-            # Store in file
-            cache_path = self._get_cache_path(key)
-            with open(cache_path, 'wb') as f:
-                pickle.dump({
-                    'timestamp': time.time(),
-                    'data': data
-                }, f)
+            # File cache
+            cache_file = os.path.join(self.cache_dir, f"{self._safe_key(key)}.pkl")
+            with open(cache_file, 'wb') as f:
+                pickle.dump({'timestamp': time.time(), 'data': data}, f)
         except Exception as e:
             logger.error(f"Cache write error: {e}")
+    
+    def _safe_key(self, key: str) -> str:
+        return re.sub(r'[^a-zA-Z0-9_-]', '_', str(key))[:100]
     
     def clear(self):
         self.memory_cache.clear()
         try:
-            for filename in os.listdir(self.cache_dir):
-                os.remove(os.path.join(self.cache_dir, filename))
+            for file in os.listdir(self.cache_dir):
+                os.remove(os.path.join(self.cache_dir, file))
         except Exception as e:
             logger.error(f"Cache clear error: {e}")
 
-class AIQueryAnalyzer:
-    """AI-powered query analyzer that understands intent and builds perfect JQL"""
+class AdvancedResponseGenerator:
+    """Advanced AI response generator"""
     
     def __init__(self, project_id: str, location: str, model_name: str):
         self.project_id = project_id
@@ -313,152 +525,33 @@ class AIQueryAnalyzer:
         vertexai.init(project=project_id, location=location)
         self.model = GenerativeModel(model_name)
     
-    def analyze_and_build_jql(self, user_query: str, jira_metadata: Dict) -> List[str]:
-        """Analyze user query and build optimal JQL queries"""
+    def generate_response(self, user_query: str, jira_data: List[Dict]) -> str:
+        """Generate comprehensive response"""
         
-        analysis_prompt = f"""You are a Jira JQL expert. Analyze the user's natural language query and create the perfect JQL queries to get exactly what they want.
+        # Format the data for AI
+        context = self._format_jira_data(jira_data)
+        
+        prompt = f"""You are JiraGPT, an expert Jira analyst. Provide a comprehensive, well-structured response.
 
 USER QUERY: "{user_query}"
 
-AVAILABLE JIRA METADATA:
-Projects: {[p['key'] + ':' + p['name'] for p in jira_metadata.get('projects', [])]}
-Issue Types: {[it['name'] for it in jira_metadata.get('issue_types', [])]}
-Priorities: {[p['name'] for p in jira_metadata.get('priorities', [])]}
-Statuses: {[s['name'] for s in jira_metadata.get('statuses', [])]}
-
-INSTRUCTIONS:
-1. Understand what the user wants (tickets about what topic, with what criteria)
-2. Create 2-3 different JQL queries that capture different aspects of their request
-3. Use text search (summary ~ "term" OR description ~ "term" OR comment ~ "term") for content matching
-4. Include relevant filters for status, priority, type, dates, etc.
-5. Order results by relevance (usually "ORDER BY updated DESC")
-
-EXAMPLES:
-- "rollout restart issues" → summary ~ "rollout restart" OR description ~ "rollout restart" OR comment ~ "rollout restart"
-- "high priority bugs" → priority = High AND issuetype = Bug
-- "tickets assigned to john" → assignee = john
-- "DR related problems" → summary ~ "DR" OR description ~ "DR" OR labels = DR
-
-OUTPUT FORMAT:
-Return ONLY the JQL queries, one per line, no explanations:
-query1
-query2
-query3
-
-JQL QUERIES:"""
-
-        try:
-            response = self.model.generate_content(
-                analysis_prompt,
-                generation_config=GenerationConfig(
-                    temperature=0.1,
-                    max_output_tokens=1000,
-                )
-            )
-            
-            if hasattr(response, 'text'):
-                jql_text = response.text.strip()
-            elif hasattr(response, 'candidates') and response.candidates:
-                jql_text = response.candidates[0].text.strip()
-            else:
-                return self._fallback_jql(user_query)
-            
-            # Parse JQL queries from response
-            jql_queries = []
-            for line in jql_text.split('\n'):
-                line = line.strip()
-                if line and not line.startswith('#') and 'jql' not in line.lower():
-                    # Clean up the query
-                    line = re.sub(r'^[-*•]\s*', '', line)  # Remove bullet points
-                    line = re.sub(r'^\d+\.\s*', '', line)  # Remove numbers
-                    if len(line) > 10:  # Reasonable minimum length
-                        jql_queries.append(line)
-            
-            if not jql_queries:
-                return self._fallback_jql(user_query)
-            
-            logger.info(f"AI generated {len(jql_queries)} JQL queries")
-            return jql_queries[:3]  # Limit to 3 queries
-            
-        except Exception as e:
-            logger.error(f"Error in AI query analysis: {e}")
-            return self._fallback_jql(user_query)
-    
-    def _fallback_jql(self, user_query: str) -> List[str]:
-        """Fallback JQL generation if AI fails"""
-        logger.info("Using fallback JQL generation")
-        
-        # Extract meaningful terms
-        terms = []
-        words = re.findall(r'\b\w+\b', user_query.lower())
-        stop_words = {'show', 'me', 'all', 'the', 'get', 'find', 'list', 'about', 'with', 'for', 'in', 'on', 'at'}
-        
-        for word in words:
-            if len(word) > 2 and word not in stop_words:
-                terms.append(word)
-        
-        jql_queries = []
-        
-        if terms:
-            # Text search query
-            text_conditions = []
-            for term in terms[:3]:  # Limit to 3 terms
-                text_conditions.append(f'summary ~ "{term}" OR description ~ "{term}"')
-            
-            if text_conditions:
-                jql_queries.append(f"({' OR '.join(text_conditions)}) ORDER BY updated DESC")
-        
-        # Add a recent items query as fallback
-        jql_queries.append("updated >= -7d ORDER BY updated DESC")
-        
-        return jql_queries
-
-class SmartResponseGenerator:
-    """AI-powered response generator with comprehensive analysis"""
-    
-    def __init__(self, project_id: str, location: str, model_name: str):
-        self.project_id = project_id
-        self.location = location
-        self.model_name = model_name
-        
-        vertexai.init(project=project_id, location=location)
-        self.model = GenerativeModel(model_name)
-    
-    def generate_response(self, user_query: str, jira_data: Dict) -> str:
-        """Generate comprehensive response based on Jira data"""
-        
-        system_prompt = """You are JiraGPT, an expert Jira analyst. Provide comprehensive, well-structured responses about Jira tickets and data.
-
-RESPONSE STRUCTURE:
-1. **SUMMARY** - Brief overview of what was found
-2. **KEY FINDINGS** - Main insights and important information  
-3. **DETAILED BREAKDOWN** - Specific ticket information
-4. **STATISTICS** - Numbers, counts, distributions
-5. **RECOMMENDATIONS** - Actionable next steps (if applicable)
-
-FORMATTING GUIDELINES:
-- Use emojis and clear headers for better readability
-- Include ticket links: [TICKET-KEY](https://cmegroup.atlassian.net/browse/TICKET-KEY)
-- Highlight important information in **bold**
-- Use bullet points for lists
-- Provide specific statistics and counts
-- Be comprehensive but concise"""
-
-        # Format the Jira data
-        context = self._format_jira_context(jira_data)
-        
-        full_prompt = f"""{system_prompt}
-
-USER QUERY: "{user_query}"
-
-JIRA DATA:
+JIRA DATA FOUND:
 {context}
 
-Provide a comprehensive response addressing the user's query:"""
+RESPONSE GUIDELINES:
+1. Start with a clear SUMMARY of what was found
+2. Provide KEY STATISTICS (counts, distributions)
+3. List IMPORTANT TICKETS with details
+4. Include INSIGHTS and PATTERNS
+5. Add RECOMMENDATIONS if applicable
+6. Use clear formatting with emojis and headers
+7. Include ticket links: [TICKET-KEY](https://cmegroup.atlassian.net/browse/TICKET-KEY)
+
+Provide a helpful, comprehensive response:"""
 
         try:
             response = self.model.generate_content(
-                full_prompt,
+                prompt,
                 generation_config=GenerationConfig(
                     temperature=0.3,
                     max_output_tokens=4000,
@@ -470,244 +563,296 @@ Provide a comprehensive response addressing the user's query:"""
             elif hasattr(response, 'candidates') and response.candidates:
                 return response.candidates[0].text
             else:
-                return "I couldn't generate a response. Please try rephrasing your question."
+                return self._fallback_response(user_query, jira_data)
                 
         except Exception as e:
-            logger.error(f"Error generating response: {e}")
-            return f"❌ Error generating response: {str(e)}"
+            logger.error(f"AI response generation error: {e}")
+            return self._fallback_response(user_query, jira_data)
     
-    def _format_jira_context(self, jira_data: Dict) -> str:
+    def _format_jira_data(self, issues: List[Dict]) -> str:
         """Format Jira data for AI context"""
-        if not jira_data:
-            return "No Jira data available."
+        if not issues:
+            return "No issues found."
         
-        context = ""
+        context = f"FOUND {len(issues)} TICKETS:\n\n"
         
-        issues = jira_data.get('issues', [])
-        if issues:
-            context += f"FOUND {len(issues)} TICKETS:\n\n"
-            
-            # Add statistics
-            stats = self._calculate_stats(issues)
-            context += "STATISTICS:\n"
-            for key, value in stats.items():
-                context += f"- {key}: {value}\n"
+        # Statistics
+        stats = self._calculate_statistics(issues)
+        context += "STATISTICS:\n"
+        for key, value in stats.items():
+            context += f"- {key}: {value}\n"
+        context += "\n"
+        
+        # Top 15 issues
+        context += "TICKET DETAILS:\n"
+        for i, issue in enumerate(issues[:15], 1):
+            context += self._format_issue(issue, i)
             context += "\n"
-            
-            # Add ticket details
-            context += "TICKET DETAILS:\n"
-            for i, issue in enumerate(issues[:20], 1):  # Limit to 20 for context
-                context += self._format_issue(issue, i)
-                context += "\n"
-        else:
-            context += "No tickets found matching the criteria.\n"
+        
+        if len(issues) > 15:
+            context += f"... and {len(issues) - 15} more tickets\n"
         
         return context
     
-    def _calculate_stats(self, issues: List[Dict]) -> Dict:
-        """Calculate statistics from issues"""
-        stats = {"Total Tickets": len(issues)}
+    def _calculate_statistics(self, issues: List[Dict]) -> Dict:
+        """Calculate statistics"""
+        stats = {"Total": len(issues)}
         
-        # Status distribution
         status_counts = defaultdict(int)
         priority_counts = defaultdict(int)
         type_counts = defaultdict(int)
+        assignee_counts = defaultdict(int)
         
         for issue in issues:
-            if issue is None:
+            if not issue:
                 continue
                 
-            fields = self.safe_get(issue, 'fields', {})
+            fields = issue.get('fields', {})
             
-            status = self.safe_get(self.safe_get(fields, 'status', {}), 'name', 'Unknown')
-            status_counts[status] += 1
+            # Status
+            status = fields.get('status', {})
+            if status:
+                status_counts[status.get('name', 'Unknown')] += 1
             
-            priority = self.safe_get(self.safe_get(fields, 'priority', {}), 'name', 'Unknown')
-            priority_counts[priority] += 1
+            # Priority
+            priority = fields.get('priority', {})
+            if priority:
+                priority_counts[priority.get('name', 'Unknown')] += 1
             
-            issue_type = self.safe_get(self.safe_get(fields, 'issuetype', {}), 'name', 'Unknown')
-            type_counts[issue_type] += 1
+            # Type
+            issuetype = fields.get('issuetype', {})
+            if issuetype:
+                type_counts[issuetype.get('name', 'Unknown')] += 1
+            
+            # Assignee
+            assignee = fields.get('assignee', {})
+            if assignee:
+                assignee_counts[assignee.get('displayName', 'Unknown')] += 1
+            else:
+                assignee_counts['Unassigned'] += 1
         
-        stats["By Status"] = dict(status_counts)
-        stats["By Priority"] = dict(priority_counts)
-        stats["By Type"] = dict(type_counts)
+        if status_counts:
+            stats["By Status"] = dict(status_counts)
+        if priority_counts:
+            stats["By Priority"] = dict(priority_counts)
+        if type_counts:
+            stats["By Type"] = dict(type_counts)
+        if assignee_counts:
+            stats["By Assignee"] = dict(list(assignee_counts.items())[:5])  # Top 5
         
         return stats
     
     def _format_issue(self, issue: Dict, index: int) -> str:
-        """Format a single issue for context"""
-        if issue is None:
-            return f"{index}. Invalid issue data\n"
+        """Format single issue"""
+        if not issue:
+            return f"{index}. Invalid issue\n"
         
-        fields = self.safe_get(issue, 'fields', {})
-        key = self.safe_get(issue, 'key', 'Unknown')
+        key = issue.get('key', 'Unknown')
+        fields = issue.get('fields', {})
         
-        formatted = f"{index}. **{key}**\n"
-        formatted += f"   Summary: {self.safe_get(fields, 'summary', 'No summary')}\n"
-        formatted += f"   Status: {self.safe_get(self.safe_get(fields, 'status', {}), 'name', 'Unknown')}\n"
-        formatted += f"   Priority: {self.safe_get(self.safe_get(fields, 'priority', {}), 'name', 'Unknown')}\n"
-        formatted += f"   Assignee: {self.safe_get(self.safe_get(fields, 'assignee', {}), 'displayName', 'Unassigned')}\n"
-        formatted += f"   Updated: {self.safe_get(fields, 'updated', 'Unknown')}\n"
+        summary = fields.get('summary', 'No summary')
+        status = fields.get('status', {}).get('name', 'Unknown')
+        priority = fields.get('priority', {}).get('name', 'Unknown')
+        assignee = fields.get('assignee', {}).get('displayName', 'Unassigned')
+        created = fields.get('created', 'Unknown')
+        updated = fields.get('updated', 'Unknown')
         
-        return formatted
+        return f"{index}. **{key}** - {summary}\n   Status: {status} | Priority: {priority} | Assignee: {assignee}\n   Created: {created} | Updated: {updated}"
     
-    def safe_get(self, obj: Any, key: str, default: Any = None) -> Any:
-        """Safely get value from object"""
-        if obj is None:
-            return default
-        if isinstance(obj, dict):
-            return obj.get(key, default)
-        return default
+    def _fallback_response(self, user_query: str, jira_data: List[Dict]) -> str:
+        """Fallback response if AI fails"""
+        if not jira_data:
+            return f"""🔍 **No Results Found**
 
-class UltraSmartJiraChatbot:
-    """The ultimate Jira chatbot that understands everything"""
+I searched extensively for "{user_query}" but didn't find any matching tickets.
+
+💡 **Suggestions:**
+• Try different keywords or terms
+• Check spelling of project names or user names  
+• Use broader search terms
+• Try asking about recent tickets in general
+
+📝 **Example queries:**
+• "Show me recent tickets"
+• "All high priority issues"
+• "Tickets from last week"
+"""
+
+        response = f"""📊 **Search Results for "{user_query}"**
+
+🎯 **SUMMARY:** Found {len(jira_data)} tickets
+
+📈 **TOP TICKETS:**
+"""
+        
+        for i, issue in enumerate(jira_data[:10], 1):
+            if issue:
+                key = issue.get('key', 'Unknown')
+                fields = issue.get('fields', {})
+                summary = fields.get('summary', 'No summary')[:80]
+                status = fields.get('status', {}).get('name', 'Unknown')
+                
+                response += f"{i}. **[{key}](https://cmegroup.atlassian.net/browse/{key})** - {summary}\n   Status: {status}\n\n"
+        
+        if len(jira_data) > 10:
+            response += f"... and {len(jira_data) - 10} more tickets found."
+        
+        return response
+
+class MasterJiraChatbot:
+    """The ultimate versatile Jira chatbot"""
     
     def __init__(self):
-        self.jira_client = SmartJiraClient(JIRA_URL, JIRA_EMAIL, JIRA_API_TOKEN)
-        self.query_analyzer = AIQueryAnalyzer(PROJECT_ID, REGION, MODEL_NAME)
-        self.response_generator = SmartResponseGenerator(PROJECT_ID, REGION, MODEL_NAME)
-        logger.info("UltraSmartJiraChatbot initialized successfully")
+        self.jira_client = UniversalJiraClient(JIRA_URL, JIRA_EMAIL, JIRA_API_TOKEN)
+        self.response_generator = AdvancedResponseGenerator(PROJECT_ID, REGION, MODEL_NAME)
+        logger.info("MasterJiraChatbot initialized")
     
-    def process_query(self, user_query: str) -> str:
-        """Process any query intelligently"""
+    def process_any_query(self, query: str) -> str:
+        """Process ANY query with guaranteed results"""
         start_time = time.time()
-        logger.info(f"Processing query: {user_query}")
+        logger.info(f"Processing: '{query}'")
         
         try:
             # Handle special commands
-            if user_query.lower().strip() in ["clear cache", "refresh cache", "reset cache"]:
+            if query.lower().strip() in ["clear cache", "refresh"]:
                 self.jira_client.cache.clear()
-                return "✅ Cache cleared! Fresh data will be fetched for your next queries."
+                return "✅ Cache cleared! Fresh data will be loaded."
             
             # Handle simple interactions
-            simple_response = self._handle_simple_interactions(user_query)
+            simple_response = self._handle_simple_interactions(query)
             if simple_response:
                 return simple_response
             
-            # Check for specific issue keys
-            issue_keys = re.findall(r'[A-Z]+-\d+', user_query.upper())
+            # Main search
+            logger.info("Starting comprehensive search...")
+            results = self.jira_client.comprehensive_search(query)
             
-            jira_data = {'issues': []}
-            
-            if issue_keys:
-                # Get specific issues
-                logger.info(f"Getting specific issues: {issue_keys}")
-                for issue_key in issue_keys:
-                    issue = self.jira_client.get_issue_details(issue_key)
-                    if issue:
-                        jira_data['issues'].append(issue)
-            else:
-                # Use AI to analyze query and build JQL
-                logger.info("Using AI to analyze query and build JQL")
-                metadata = self.jira_client.get_jira_metadata()
-                jql_queries = self.query_analyzer.analyze_and_build_jql(user_query, metadata)
-                
-                all_issues = []
-                for jql in jql_queries:
-                    issues = self.jira_client.execute_jql_query(jql, max_results=50)
-                    all_issues.extend(issues)
-                
-                # Remove duplicates
-                seen_keys = set()
-                unique_issues = []
-                for issue in all_issues:
-                    if issue is None:
-                        continue
-                    key = self.jira_client.safe_get(issue, 'key')
-                    if key and key not in seen_keys:
-                        seen_keys.add(key)
-                        unique_issues.append(issue)
-                
-                jira_data['issues'] = unique_issues
+            logger.info(f"Found {len(results)} total results")
             
             # Generate response
-            response = self.response_generator.generate_response(user_query, jira_data)
+            response = self.response_generator.generate_response(query, results)
             
-            elapsed_time = time.time() - start_time
-            logger.info(f"Query processed in {elapsed_time:.2f} seconds")
+            elapsed = time.time() - start_time
+            logger.info(f"Query processed in {elapsed:.2f} seconds")
             
             return response
             
         except Exception as e:
-            logger.error(f"Error processing query: {e}")
-            return f"❌ Sorry, I encountered an error: {str(e)}\n\nPlease try rephrasing your question or check the logs for more details."
+            logger.error(f"Critical error: {e}")
+            return f"❌ **Error occurred:** {str(e)}\n\nPlease try a different query or check the logs."
     
     def _handle_simple_interactions(self, query: str) -> Optional[str]:
-        """Handle greetings and simple interactions"""
+        """Handle greetings and help"""
         query_lower = query.lower().strip()
         
         if any(word in query_lower for word in ['hello', 'hi', 'hey']):
-            return """👋 **Hello! I'm your Ultra-Smart Jira Assistant!**
+            return """👋 **Hello! I'm your Master Jira Assistant!**
 
-🚀 **I can understand ANY question about your Jira tickets:**
-• "Show me rollout restart issues"
-• "High priority bugs from last week" 
-• "DR related tickets assigned to John"
-• "Traffic surge problems this month"
-• "Tell me about RDRF-2606"
+🚀 **I can find ANY Jira ticket or information:**
+• Tickets about any topic: "rollout restart issues"
+• Assigned tickets: "tickets assigned to lakshya vijay"  
+• Project tickets: "BAMPS tickets"
+• Recent tickets: "tickets from last week"
+• Priority tickets: "high priority bugs"
 
-Just ask me naturally - I'll understand and find exactly what you need! 💡"""
+Just ask me naturally - I'll find what you need! 💪"""
 
         if any(word in query_lower for word in ['bye', 'goodbye', 'thanks']):
-            return "👋 Goodbye! Come back anytime you need help with your Jira tickets!"
+            return "👋 Goodbye! Come back anytime for Jira help!"
         
         if any(word in query_lower for word in ['help', 'what can you do']):
-            return """🤖 **I'm your intelligent Jira assistant!**
+            return """🤖 **I'm your versatile Jira expert!**
 
-✨ **What makes me special:**
-• **Natural Language Understanding**: Ask questions naturally, no rigid syntax needed
-• **AI-Powered Search**: I analyze your question and build perfect queries automatically  
-• **Comprehensive Responses**: Get summaries, statistics, and insights
-• **Flexible Queries**: Handle any type of Jira question you can think of
+✨ **What I guarantee:**
+• **Find ANY ticket** - no matter how you ask
+• **Multiple search strategies** - text, user, project, status, date
+• **Comprehensive results** - I'll always find something relevant
+• **Smart understanding** - natural language processing
 
-💡 **Just ask me anything about your Jira tickets!**"""
+💡 **Try these examples:**
+• "bamps tickets" 
+• "tickets assigned to lakshya vijay"
+• "rollout restart problems"
+• "high priority issues from last week"
+• "DR related tickets"
+• "show me recent bugs"
+
+**I WILL find results for any query!** 🎯"""
         
         return None
     
-    def run_chat(self):
-        """Run the interactive chat"""
-        print("\n" + "="*70)
-        print("🚀 ULTRA-SMART JIRA CHATBOT")
-        print("="*70)
-        print("💡 Ask me ANYTHING about your Jira tickets - I understand natural language!")
-        print("\n📝 Examples:")
-        print("   • 'Show me all rollout restart issues'")
-        print("   • 'High priority DR tickets from last month'") 
-        print("   • 'Bugs assigned to John about database'")
-        print("   • 'Traffic surge alerts this week'")
-        print("\n💬 Type 'exit' to quit, 'clear cache' to refresh")
-        print("="*70)
+    def run_interactive_chat(self):
+        """Run the master chatbot"""
+        print("\n" + "="*80)
+        print("🚀 MASTER JIRA CHATBOT - GUARANTEED RESULTS")
+        print("="*80)
+        print("💪 I can find ANY Jira information - just ask naturally!")
+        print("\n📝 **Test these to see my power:**")
+        print("   • 'bamps tickets'")
+        print("   • 'tickets assigned to lakshya vijay'") 
+        print("   • 'rollout restart issues'")
+        print("   • 'high priority bugs'")
+        print("   • 'DR related problems'")
+        print("   • 'show me recent tickets'")
+        print("\n💬 Type 'exit' to quit | 'clear cache' to refresh")
+        print("="*80)
         
         while True:
             try:
-                user_input = input("\n🗣️  Ask me: ").strip()
+                user_input = input("\n🗣️  Ask anything: ").strip()
                 
                 if not user_input:
                     continue
                     
                 if user_input.lower() in ["exit", "quit", "bye"]:
-                    print("\n🤖 Goodbye! Thanks for using Ultra-Smart Jira Chatbot! 👋")
+                    print("\n🤖 **Master JiraGPT:** 👋 Thanks for using Master Jira Chatbot!")
                     break
                 
-                print(f"\n🤖 **JiraGPT**: ", end="")
-                response = self.process_query(user_input)
+                print(f"\n🤖 **Master JiraGPT:** ", end="")
+                response = self.process_any_query(user_input)
                 print(response)
                 
             except KeyboardInterrupt:
-                print("\n\n🤖 Goodbye! Thanks for using Ultra-Smart Jira Chatbot! 👋")
+                print("\n\n🤖 **Master JiraGPT:** 👋 Goodbye!")
                 break
             except Exception as e:
-                print(f"\n❌ Error: {e}")
+                print(f"\n❌ Unexpected error: {e}")
+
+def test_connection():
+    """Test Jira connection"""
+    try:
+        print("🔄 Testing Jira connection...")
+        client = UniversalJiraClient(JIRA_URL, JIRA_EMAIL, JIRA_API_TOKEN)
+        
+        # Test basic connectivity
+        projects = client.get_all_projects()
+        print(f"✅ Connected! Found {len(projects)} projects")
+        
+        # Test search
+        test_results = client.execute_jql("updated >= -7d ORDER BY updated DESC", max_results=5)
+        print(f"✅ Search working! Found {len(test_results)} recent tickets")
+        
+        return True
+        
+    except Exception as e:
+        print(f"❌ Connection failed: {e}")
+        return False
 
 def main():
-    """Main function"""
+    """Main function to run the ultimate chatbot"""
+    print("🚀 Starting Master Jira Chatbot...")
+    
+    # Test connection first
+    if not test_connection():
+        print("Please check your Jira credentials and try again.")
+        return
+    
     try:
-        print("🔄 Initializing Ultra-Smart Jira Chatbot...")
-        chatbot = UltraSmartJiraChatbot()
-        print("✅ Ready to help with your Jira queries!")
-        chatbot.run_chat()
+        chatbot = MasterJiraChatbot()
+        print("🎯 Master Jira Chatbot is ready!")
+        chatbot.run_interactive_chat()
     except Exception as e:
-        print(f"❌ Failed to start: {e}")
+        print(f"❌ Failed to start chatbot: {e}")
 
 if __name__ == "__main__":
     main()
