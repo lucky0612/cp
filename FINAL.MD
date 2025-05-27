@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
-import os
-import json
 import logging
+import os
+import sys
+import json
 import re
 import time
 import concurrent.futures
 from datetime import datetime
-from typing import Dict, List, Optional, Any
 from functools import lru_cache
 import threading
+import queue
 
 # Web framework
 from flask import Flask, render_template, request, jsonify
@@ -18,6 +19,7 @@ from flask_cors import CORS
 import requests
 from requests.auth import HTTPBasicAuth
 from bs4 import BeautifulSoup
+from urllib.parse import urljoin
 
 # AI/ML
 import vertexai
@@ -27,18 +29,7 @@ from vertexai.generative_models import GenerativeModel, GenerationConfig
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# Enhanced logging configuration
-logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler("unified_assistant.log"),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger("UnifiedAssistant")
-
-# Configuration with better defaults
+# Configuration
 PROJECT_ID = os.environ.get("PROJECT_ID", "prj-dv-cws-4363")
 REGION = os.environ.get("REGION", "us-central1")
 MODEL_NAME = os.environ.get("MODEL_NAME", "gemini-2.0-flash-001")
@@ -48,19 +39,31 @@ CONFLUENCE_URL = os.environ.get("CONFLUENCE_URL", "https://cmegroup.atlassian.ne
 CONFLUENCE_USERNAME = os.environ.get("CONFLUENCE_USERNAME", "lakshya.vijay@cmegroup.com")
 CONFLUENCE_API_TOKEN = os.environ.get("CONFLUENCE_API_TOKEN", "")
 CONFLUENCE_SPACE = os.environ.get("CONFLUENCE_SPACE", "RE")
+CONFLUENCE_ALL_SPACES = os.environ.get("CONFLUENCE_ALL_SPACES", "false").lower() == "true"
 
 # Jira Configuration
 JIRA_URL = os.environ.get("JIRA_URL", "https://cmegroup.atlassian.net/")
 JIRA_EMAIL = os.environ.get("JIRA_EMAIL", "lakshya.vijay@cmegroup.com")
 JIRA_API_TOKEN = os.environ.get("JIRA_API_TOKEN", "")
 
+# Logging configuration
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("unified_assistant.log"),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+logger = logging.getLogger("UnifiedAssistant")
+
 # Performance settings
-MAX_WORKERS = 3
-CACHE_SIZE = 100
-REQUEST_TIMEOUT = 15
+MAX_WORKERS = 5
+CACHE_SIZE = 128
+PAGE_CACHE_FILE = "page_cache.json"
 
 class ContentExtractor:
-    """Extract and process content from Confluence HTML."""
+    """Extract and process content from Confluence HTML - FULL VERSION."""
     
     def __init__(self, base_url, page_id=None, page_title=None):
         self.base_url = base_url
@@ -68,38 +71,293 @@ class ContentExtractor:
         self.page_title = page_title
     
     def extract_content_from_html(self, html_content):
-        """Extract text, tables from HTML content - simplified for speed."""
-        try:
-            soup = BeautifulSoup(html_content, 'html.parser')
+        """Extract text, tables, and images from HTML content."""
+        soup = BeautifulSoup(html_content, 'html.parser')
+        
+        # Extract basic metadata
+        metadata = {
+            "id": self.page_id,
+            "title": self.page_title,
+            "url": f"{self.base_url}/pages/viewpage.action?pageId={self.page_id}" if self.page_id else None,
+            "type": "page",
+            "labels": []
+        }
+        
+        # Extract content sections
+        sections = []
+        
+        # Extract text
+        text_content = self._extract_text_content(soup)
+        if text_content:
+            sections.append({"type": "text", "content": text_content})
+        
+        # Extract tables
+        tables = self._extract_tables(soup)
+        if tables:
+            sections.append({"type": "tables", "content": tables})
+        
+        # Extract images
+        images = self._extract_images(soup)
+        if images:
+            sections.append({"type": "images", "content": images})
+        
+        # Extract code blocks
+        code_blocks = self._extract_code_blocks(soup)
+        if code_blocks:
+            sections.append({"type": "code_blocks", "content": code_blocks})
+        
+        return {
+            "metadata": metadata,
+            "sections": sections,
+            "raw_html": html_content
+        }
+    
+    def _extract_text_content(self, soup):
+        """Extract and format text content."""
+        text_content = []
+        
+        # Remove script and style elements
+        for script in soup(["script", "style"]):
+            script.decompose()
+        
+        # Extract headings
+        for heading in soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6']):
+            level = int(heading.name[1])
+            text = heading.get_text(strip=True)
+            if text:
+                text_content.append({"type": "heading", "level": level, "text": text})
+        
+        # Extract paragraphs
+        for p in soup.find_all('p'):
+            text = p.get_text(strip=True)
+            if text:
+                text_content.append({"type": "paragraph", "text": text})
+        
+        # Extract lists
+        for list_elem in soup.find_all(['ul', 'ol']):
+            list_items = []
+            for li in list_elem.find_all('li'):
+                text = li.get_text(strip=True)
+                if text:
+                    list_items.append(text)
+            if list_items:
+                list_type = "unordered" if list_elem.name == 'ul' else "ordered"
+                text_content.append({"type": "list", "list_type": list_type, "items": list_items})
+        
+        return text_content
+    
+    def _extract_tables(self, soup):
+        """Extract tables with improved handling."""
+        tables = []
+        
+        for table in soup.find_all('table'):
+            table_data = []
             
-            # Remove script and style elements
-            for script in soup(["script", "style"]):
-                script.decompose()
+            # Extract headers
+            headers = []
+            thead = table.find('thead')
+            if thead:
+                for th in thead.find_all('th'):
+                    headers.append(th.get_text(strip=True))
+            elif table.find('tr'):
+                # Check first row for headers
+                first_row = table.find('tr')
+                cells = first_row.find_all(['th', 'td'])
+                if cells and all(cell.name == 'th' for cell in cells):
+                    headers = [cell.get_text(strip=True) for cell in cells]
             
-            # Extract all text content quickly
-            text_content = soup.get_text(separator='\n', strip=True)
+            # Extract rows
+            tbody = table.find('tbody') or table
+            for tr in tbody.find_all('tr'):
+                row_data = []
+                for td in tr.find_all(['td', 'th']):
+                    cell_content = self._extract_cell_content(td)
+                    row_data.append(cell_content)
+                if row_data and not all(cell.name == 'th' for cell in tr.find_all(['td', 'th'])):
+                    table_data.append(row_data)
             
-            # Basic cleanup
-            lines = [line.strip() for line in text_content.split('\n') if line.strip()]
-            cleaned_text = '\n'.join(lines)
-            
-            return {
-                "metadata": {
-                    "id": self.page_id,
-                    "title": self.page_title,
-                    "url": f"{self.base_url}/pages/viewpage.action?pageId={self.page_id}" if self.page_id else None
-                },
-                "content": cleaned_text[:5000]  # Limit content size
+            if table_data:
+                formatted_table = self._format_table(headers, table_data)
+                tables.append({
+                    "headers": headers,
+                    "rows": table_data,
+                    "formatted": formatted_table
+                })
+        
+        return tables
+    
+    def _extract_cell_content(self, cell):
+        """Extract content from table cell including nested elements."""
+        nested_table = cell.find('table')
+        if nested_table:
+            return "[Nested Table]"
+        
+        img = cell.find('img')
+        if img:
+            alt = img.get('alt', 'Image')
+            return f"[Image: {alt}]" if alt else "[Image]"
+        
+        code = cell.find('code')
+        if code:
+            return f"[Code: {code.get_text(strip=True)}]"
+        
+        return cell.get_text(strip=True)
+    
+    def _format_table(self, headers, rows):
+        """Format table for better readability."""
+        if not rows:
+            return ""
+        
+        col_widths = []
+        if headers:
+            col_widths = [len(h) for h in headers]
+            for row in rows:
+                for i, cell in enumerate(row[:len(headers)]):
+                    col_widths[i] = max(col_widths[i], len(str(cell)))
+        else:
+            if rows:
+                col_widths = [0] * len(rows[0])
+                for row in rows:
+                    for i, cell in enumerate(row):
+                        col_widths[i] = max(col_widths[i], len(str(cell)))
+        
+        formatted = []
+        
+        if headers:
+            header_row = " | ".join(h.ljust(col_widths[i]) for i, h in enumerate(headers))
+            separator = "-|-".join("-" * w for w in col_widths)
+            formatted.append(header_row)
+            formatted.append(separator)
+        
+        for row in rows:
+            formatted_row = " | ".join(str(cell).ljust(col_widths[i]) for i, cell in enumerate(row[:len(col_widths)]))
+            formatted.append(formatted_row)
+        
+        return "\n".join(formatted)
+    
+    def _extract_images(self, soup):
+        """Extract images with improved metadata."""
+        images = []
+        
+        for img in soup.find_all('img'):
+            img_data = {
+                "src": img.get('src', ''),
+                "alt": img.get('alt', ''),
+                "title": img.get('title', ''),
+                "width": img.get('width', ''),
+                "height": img.get('height', '')
             }
-        except Exception as e:
-            logger.error(f"Error extracting content: {e}")
-            return {
-                "metadata": {"title": self.page_title or "Unknown"},
-                "content": ""
-            }
+            
+            parent = img.find_parent(['figure', 'div', 'p'])
+            if parent:
+                figcaption = parent.find('figcaption')
+                if figcaption:
+                    img_data['caption'] = figcaption.get_text(strip=True)
+                
+                prev_elem = parent.find_previous_sibling(['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
+                if prev_elem and len(prev_elem.get_text(strip=True)) < 200:
+                    img_data['context'] = prev_elem.get_text(strip=True)
+            
+            images.append(img_data)
+        
+        return images
+    
+    def _extract_code_blocks(self, soup):
+        """Extract code blocks with language detection."""
+        code_blocks = []
+        
+        for pre in soup.find_all('pre'):
+            code = pre.find('code')
+            if code:
+                code_class = code.get('class', [])
+                lang = ""
+                for cls in code_class:
+                    if cls.startswith('language-'):
+                        lang = cls.replace('language-', '')
+                        break
+                
+                code_content = code.get_text(strip=True)
+                if code_content:
+                    code_blocks.append({
+                        "language": lang,
+                        "content": code_content
+                    })
+            else:
+                code_content = pre.get_text(strip=True)
+                if code_content:
+                    code_blocks.append({
+                        "language": "",
+                        "content": code_content
+                    })
+        
+        for code in soup.find_all('code'):
+            if not code.find_parent('pre'):
+                code_content = code.get_text(strip=True)
+                if code_content:
+                    code_blocks.append({
+                        "language": "inline",
+                        "content": code_content
+                    })
+        
+        return code_blocks
+    
+    def format_for_context(self, extracted_content):
+        """Format extracted content for AI context."""
+        formatted = []
+        
+        metadata = extracted_content.get('metadata', {})
+        if metadata.get('title'):
+            formatted.append(f"## {metadata['title']}")
+        if metadata.get('url'):
+            formatted.append(f"URL: {metadata['url']}")
+        formatted.append("")
+        
+        for section in extracted_content.get('sections', []):
+            section_type = section.get('type')
+            content = section.get('content', [])
+            
+            if section_type == 'text':
+                for item in content:
+                    if item['type'] == 'heading':
+                        formatted.append("#" * item['level'] + " " + item['text'])
+                    elif item['type'] == 'paragraph':
+                        formatted.append(item['text'])
+                    elif item['type'] == 'list':
+                        for list_item in item['items']:
+                            prefix = "•" if item['list_type'] == 'unordered' else "1."
+                            formatted.append(f"{prefix} {list_item}")
+                    formatted.append("")
+            
+            elif section_type == 'tables':
+                formatted.append("### Tables")
+                for table in content:
+                    formatted.append(table['formatted'])
+                    formatted.append("")
+            
+            elif section_type == 'code_blocks':
+                formatted.append("### Code Examples")
+                for code in content:
+                    lang = code.get('language', '')
+                    formatted.append(f"```{lang}")
+                    formatted.append(code['content'])
+                    formatted.append("```")
+                    formatted.append("")
+            
+            elif section_type == 'images':
+                formatted.append("### Images")
+                for img in content:
+                    desc = img.get('alt') or img.get('title') or 'Image'
+                    formatted.append(f"[IMAGE: {desc}]")
+                    if img.get('caption'):
+                        formatted.append(f"Caption: {img['caption']}")
+                    if img.get('context'):
+                        formatted.append(f"Context: {img['context']}")
+                    formatted.append("")
+        
+        return "\n".join(formatted)
 
 class ConfluenceClient:
-    """Simplified Confluence client."""
+    """Client for Confluence REST API operations - FULL VERSION."""
     
     def __init__(self, base_url, username, api_token):
         self.base_url = base_url.rstrip('/')
@@ -109,151 +367,195 @@ class ConfluenceClient:
         self.session.headers.update({
             "Accept": "application/json",
             "Content-Type": "application/json",
-            "User-Agent": "CME-Knowledge-Assistant/1.0"
+            "User-Agent": "RE-AI-Python-Agent"
         })
         self.cache = {}
-        self.space_key = CONFLUENCE_SPACE
-        logger.info(f"Confluence client initialized for {self.base_url}")
+        self.cache_lock = threading.Lock()
+        logger.info(f"Initialized Confluence client for {self.base_url}")
     
     def test_connection(self):
         """Test connection to Confluence."""
         try:
-            logger.info("Testing Confluence connection...")
             response = self.session.get(
                 f"{self.base_url}/rest/api/content",
                 params={"limit": 1},
-                timeout=REQUEST_TIMEOUT,
+                timeout=30,
                 verify=False
             )
-            connected = response.status_code == 200
-            logger.info(f"Confluence connection: {'SUCCESS' if connected else 'FAILED'}")
-            return connected
-        except Exception as e:
-            logger.error(f"Confluence connection test failed: {e}")
+            if response.status_code == 200:
+                logger.info("Connection to Confluence successful!")
+                return True
+            else:
+                logger.error(f"Connection failed with status code: {response.status_code}")
+                return False
+        except requests.RequestException as e:
+            logger.error(f"Connection test failed: {str(e)}")
             return False
     
-    def search_content(self, query, limit=5):
-        """Search Confluence content with fallback methods."""
+    @lru_cache(maxsize=CACHE_SIZE)
+    def get_cached_request(self, url, params_str):
+        """Cached version of GET requests."""
         try:
-            logger.info(f"Searching Confluence for: '{query}'")
-            
-            # Method 1: Try CQL search
-            try:
-                search_params = {
-                    "cql": f'space = "{self.space_key}" AND text ~ "{query}"',
-                    "limit": limit,
-                    "expand": "body.storage"
-                }
-                
-                response = self.session.get(
-                    f"{self.base_url}/rest/api/content/search",
-                    params=search_params,
-                    timeout=REQUEST_TIMEOUT,
-                    verify=False
-                )
-                
-                if response.status_code == 200:
-                    data = response.json()
-                    results = data.get("results", [])
-                    if results:
-                        logger.info(f"CQL search found {len(results)} results")
-                        return self._process_search_results(results)
-                else:
-                    logger.warning(f"CQL search failed: {response.status_code}")
-            except Exception as e:
-                logger.warning(f"CQL search failed: {e}")
-            
-            # Method 2: Try simple content API with space filter
-            try:
-                logger.info("Falling back to content API search...")
-                search_params = {
-                    "spaceKey": self.space_key,
-                    "expand": "body.storage",
-                    "limit": 50  # Get more to filter locally
-                }
-                
-                response = self.session.get(
-                    f"{self.base_url}/rest/api/content",
-                    params=search_params,
-                    timeout=REQUEST_TIMEOUT,
-                    verify=False
-                )
-                
-                if response.status_code == 200:
-                    data = response.json()
-                    all_results = data.get("results", [])
-                    
-                    # Filter results locally
-                    query_words = query.lower().split()
-                    filtered_results = []
-                    
-                    for result in all_results:
-                        title = result.get("title", "").lower()
-                        if any(word in title for word in query_words):
-                            filtered_results.append(result)
-                            if len(filtered_results) >= limit:
-                                break
-                    
-                    if filtered_results:
-                        logger.info(f"Content API found {len(filtered_results)} matching results")
-                        return self._process_search_results(filtered_results)
-                    else:
-                        logger.info("No matching results found, returning recent pages")
-                        return self._process_search_results(all_results[:limit])
-                        
-            except Exception as e:
-                logger.error(f"Content API search failed: {e}")
-            
-            return []
-            
+            params = json.loads(params_str)
+            response = self.session.get(
+                url,
+                params=params,
+                timeout=30,
+                verify=False
+            )
+            response.raise_for_status()
+            return response.json()
         except Exception as e:
-            logger.error(f"Confluence search error: {e}")
-            return []
+            logger.error(f"Error in cached request to {url}: {str(e)}")
+            return None
     
-    def _process_search_results(self, results):
-        """Process search results into extracted content."""
-        extracted_results = []
+    def get_all_spaces(self):
+        """Get all accessible spaces in Confluence."""
+        spaces = []
+        start = 0
+        limit = 100
         
-        for result in results:
+        while True:
             try:
-                page_id = result.get("id")
-                title = result.get("title", "Unknown")
+                url = f"{self.base_url}/rest/api/space"
+                params = {
+                    "start": start,
+                    "limit": limit,
+                    "expand": "description"
+                }
                 
-                # Get content
-                body = result.get("body", {})
+                response = self.session.get(url, params=params, timeout=30, verify=False)
+                response.raise_for_status()
+                
+                data = response.json()
+                results = data.get("results", [])
+                
+                if not results:
+                    break
+                
+                for space in results:
+                    spaces.append({
+                        "key": space.get("key"),
+                        "name": space.get("name"),
+                        "type": space.get("type"),
+                        "id": space.get("id")
+                    })
+                
+                if "size" in data and data["size"] < limit:
+                    break
+                
+                start += limit
+                
+            except Exception as e:
+                logger.error(f"Error fetching spaces: {str(e)}")
+                break
+        
+        logger.info(f"Found {len(spaces)} accessible spaces")
+        return spaces
+    
+    def get_all_pages_in_space(self, space_key, batch_size=100):
+        """Get all pages in a space using efficient pagination."""
+        all_pages = []
+        start = 0
+        has_more = True
+        
+        logger.info(f"Fetching all pages from space: {space_key}")
+        
+        while has_more:
+            try:
+                params = {
+                    "spaceKey": space_key,
+                    "expand": "history",
+                    "limit": batch_size,
+                    "start": start
+                }
+                
+                params_str = json.dumps(params, sort_keys=True)
+                response_data = self.get_cached_request(f"{self.base_url}/rest/api/content", params_str)
+                
+                if not response_data:
+                    break
+                
+                results = response_data.get("results", [])
+                all_pages.extend(results)
+                
+                if "size" in response_data and "limit" in response_data:
+                    if response_data["size"] < response_data["limit"]:
+                        has_more = False
+                    else:
+                        start += batch_size
+                else:
+                    has_more = False
+                
+                logger.info(f"Fetched {len(results)} pages, total so far: {len(all_pages)}")
+                time.sleep(0.2)
+                
+            except Exception as e:
+                logger.error(f"Error fetching pages: {str(e)}")
+                break
+        
+        logger.info(f"Successfully fetched {len(all_pages)} pages from space {space_key}")
+        return all_pages
+    
+    def get_page_content(self, page_id, expand=None):
+        """Get content of a page."""
+        try:
+            cache_key = f"page_content_{page_id}_{expand}"
+            with self.cache_lock:
+                if cache_key in self.cache:
+                    return self.cache[cache_key]
+            
+            url = f"{self.base_url}/rest/api/content/{page_id}"
+            params = {}
+            if expand:
+                params["expand"] = expand
+            
+            response = self.session.get(url, params=params, timeout=30, verify=False)
+            
+            if response.status_code == 200:
+                page_data = response.json()
+                
+                metadata = {
+                    "id": page_data.get("id"),
+                    "title": page_data.get("title"),
+                    "type": page_data.get("type"),
+                    "url": f"{self.base_url}/pages/viewpage.action?pageId={page_data.get('id')}",
+                    "space": page_data.get("space", {}).get("key", ""),
+                    "labels": [label.get("name") for label in page_data.get("metadata", {}).get("labels", {}).get("results", [])]
+                }
+                
+                body = page_data.get("body", {})
                 storage = body.get("storage", {})
                 html_content = storage.get("value", "")
                 
-                if not html_content:
-                    # Try to fetch content separately
-                    try:
-                        content_response = self.session.get(
-                            f"{self.base_url}/rest/api/content/{page_id}",
-                            params={"expand": "body.storage"},
-                            timeout=REQUEST_TIMEOUT,
-                            verify=False
-                        )
-                        if content_response.status_code == 200:
-                            content_data = content_response.json()
-                            html_content = content_data.get("body", {}).get("storage", {}).get("value", "")
-                    except:
-                        pass
+                extractor = ContentExtractor(
+                    base_url=self.base_url,
+                    page_id=page_data.get("id"),
+                    page_title=page_data.get("title")
+                )
+                extracted_content = extractor.extract_content_from_html(html_content)
+                formatted_content = extractor.format_for_context(extracted_content)
                 
-                if html_content:
-                    extractor = ContentExtractor(self.base_url, page_id, title)
-                    extracted = extractor.extract_content_from_html(html_content)
-                    if extracted["content"]:
-                        extracted_results.append(extracted)
-                        
-            except Exception as e:
-                logger.error(f"Error processing result: {e}")
-                continue
-        
-        logger.info(f"Successfully processed {len(extracted_results)} Confluence pages")
-        return extracted_results
+                result = {
+                    "metadata": metadata,
+                    "content": formatted_content,
+                    "raw_html": html_content
+                }
+                
+                with self.cache_lock:
+                    self.cache[cache_key] = result
+                
+                return result
+            else:
+                logger.warning(f"Failed to get content for page {page_id}: {response.status_code}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Error processing page content: {str(e)}")
+            return None
 
-class JiraClient:
-    """Simplified Jira client."""
+class SafeJiraClient:
+    """Ultra-safe Jira client with bulletproof error handling - FULL VERSION."""
     
     def __init__(self):
         self.base_url = JIRA_URL.rstrip('/')
@@ -262,306 +564,702 @@ class JiraClient:
             "Accept": "application/json",
             "Content-Type": "application/json"
         }
-        logger.info(f"Jira client initialized for {self.base_url}")
+        self._metadata = None
+        logger.info("Jira client initialized")
+    
+    def safe_get(self, obj, key, default=None):
+        """Ultra-safe getter that never fails."""
+        try:
+            if obj is None:
+                return default
+            if isinstance(obj, dict):
+                return obj.get(key, default)
+            if hasattr(obj, key):
+                return getattr(obj, key, default)
+            return default
+        except:
+            return default
+    
+    def make_request(self, endpoint: str, params: Dict = None) -> Optional[Dict]:
+        """Make safe HTTP request."""
+        url = f"{self.base_url}/rest/api/3/{endpoint}"
+        
+        try:
+            logger.info(f"Making request to: {endpoint}")
+            response = requests.get(
+                url,
+                headers=self.headers,
+                params=params or {},
+                auth=self.auth,
+                verify=False,
+                timeout=30
+            )
+            
+            if response.status_code == 200:
+                return response.json()
+            else:
+                logger.warning(f"Request failed: {response.status_code}")
+                return None
+                
+        except Exception as e:
+            logger.error(f"Request error: {e}")
+            return None
     
     def test_connection(self):
         """Test connection to Jira."""
         try:
-            logger.info("Testing Jira connection...")
-            response = requests.get(
-                f"{self.base_url}/rest/api/3/myself",
-                headers=self.headers,
-                auth=self.auth,
-                verify=False,
-                timeout=REQUEST_TIMEOUT
-            )
-            connected = response.status_code == 200
-            logger.info(f"Jira connection: {'SUCCESS' if connected else 'FAILED'}")
-            return connected
+            result = self.make_request('myself')
+            if result:
+                logger.info("Connection to Jira successful!")
+                return True
+            else:
+                logger.error("Jira connection failed")
+                return False
         except Exception as e:
             logger.error(f"Jira connection test failed: {e}")
             return False
     
-    def search_issues(self, query, max_results=10):
-        """Search Jira issues with simplified JQL."""
+    def get_jira_metadata(self) -> Dict:
+        """Get Jira metadata for AI context."""
+        if self._metadata:
+            return self._metadata
+        
+        logger.info("Loading Jira metadata...")
+        metadata = {
+            'projects': [],
+            'users': [],
+            'statuses': [],
+            'priorities': [],
+            'issue_types': []
+        }
+        
         try:
-            logger.info(f"Searching Jira for: '{query}'")
+            # Get projects
+            projects = self.make_request('project') or []
+            for project in projects:
+                if project:
+                    metadata['projects'].append({
+                        'key': self.safe_get(project, 'key', ''),
+                        'name': self.safe_get(project, 'name', '')
+                    })
             
-            # Build simple JQL queries
-            jql_queries = self._build_jql_queries(query)
+            # Get sample users
+            users = self.make_request('users/search', {'maxResults': 50}) or []
+            for user in users:
+                if user:
+                    metadata['users'].append({
+                        'displayName': self.safe_get(user, 'displayName', ''),
+                        'emailAddress': self.safe_get(user, 'emailAddress', '')
+                    })
             
-            all_issues = []
-            for jql in jql_queries:
-                logger.info(f"Executing JQL: {jql}")
-                
-                params = {
-                    "jql": jql,
-                    "maxResults": max_results,
-                    "fields": "summary,status,priority,assignee,created,updated,description"
-                }
-                
-                response = requests.get(
-                    f"{self.base_url}/rest/api/3/search",
-                    headers=self.headers,
-                    params=params,
-                    auth=self.auth,
-                    verify=False,
-                    timeout=REQUEST_TIMEOUT
-                )
-                
-                if response.status_code == 200:
-                    data = response.json()
-                    issues = data.get("issues", [])
-                    logger.info(f"JQL returned {len(issues)} issues")
-                    all_issues.extend(issues)
-                    
-                    if len(all_issues) >= max_results:
-                        break
-                else:
-                    logger.warning(f"JQL query failed: {response.status_code}")
+            # Get statuses
+            statuses = self.make_request('status') or []
+            for status in statuses:
+                if status:
+                    metadata['statuses'].append(self.safe_get(status, 'name', ''))
             
-            # Remove duplicates
-            unique_issues = []
-            seen_keys = set()
-            for issue in all_issues:
-                key = issue.get("key")
-                if key and key not in seen_keys:
-                    seen_keys.add(key)
-                    unique_issues.append(issue)
+            # Get priorities
+            priorities = self.make_request('priority') or []
+            for priority in priorities:
+                if priority:
+                    metadata['priorities'].append(self.safe_get(priority, 'name', ''))
             
-            logger.info(f"Found {len(unique_issues)} unique Jira issues")
-            return unique_issues[:max_results]
+            # Get issue types
+            issue_types = self.make_request('issuetype') or []
+            for issue_type in issue_types:
+                if issue_type:
+                    metadata['issue_types'].append(self.safe_get(issue_type, 'name', ''))
+            
+            self._metadata = metadata
+            logger.info(f"Loaded metadata: {len(metadata['projects'])} projects, {len(metadata['users'])} users")
             
         except Exception as e:
-            logger.error(f"Jira search error: {e}")
-            return []
+            logger.error(f"Error loading metadata: {e}")
+        
+        return metadata
     
-    def _build_jql_queries(self, query):
-        """Build simple JQL queries based on the user query."""
-        words = [w.strip() for w in query.lower().split() if len(w) > 2]
+    def execute_jql(self, jql: str, max_results: int = 100) -> List[Dict]:
+        """Execute JQL query safely."""
+        if not jql or not jql.strip():
+            return []
         
-        jql_queries = []
-        
-        if words:
-            # Text search (most comprehensive)
-            main_terms = ' '.join(words[:3])
-            jql_queries.append(f'text ~ "{main_terms}" ORDER BY updated DESC')
+        try:
+            logger.info(f"Executing JQL: {jql}")
+            params = {
+                "jql": jql,
+                "maxResults": max_results,
+                "fields": "*all"
+            }
             
-            # Summary search
-            jql_queries.append(f'summary ~ "{words[0]}" ORDER BY updated DESC')
+            result = self.make_request('search', params)
+            if result:
+                issues = self.safe_get(result, 'issues', [])
+                logger.info(f"JQL returned {len(issues)} issues")
+                return [issue for issue in issues if issue]
             
-            # Description search
-            jql_queries.append(f'description ~ "{words[0]}" ORDER BY updated DESC')
-        
-        # Fallback: recent issues
-        jql_queries.append('updated >= -30d ORDER BY updated DESC')
-        
-        return jql_queries
+            return []
+            
+        except Exception as e:
+            logger.error(f"JQL execution error: {e}")
+            return []
 
-class AIAssistant:
-    """Simplified AI assistant."""
+class AIJiraAnalyzer:
+    """AI-powered Jira query analyzer and response generator - FULL VERSION."""
     
     def __init__(self):
-        try:
-            vertexai.init(project=PROJECT_ID, location=REGION)
-            self.model = GenerativeModel(MODEL_NAME)
-            logger.info(f"AI Assistant initialized with {MODEL_NAME}")
-        except Exception as e:
-            logger.error(f"Failed to initialize AI: {e}")
-            self.model = None
+        vertexai.init(project=PROJECT_ID, location=REGION)
+        self.model = GenerativeModel(MODEL_NAME)
+        logger.info("AI analyzer initialized")
     
-    def generate_response(self, user_query, confluence_data, jira_data, selected_sources):
-        """Generate unified response."""
-        if not self.model:
-            return "AI service is not available. Please check the configuration."
+    def analyze_query_and_build_jql(self, user_query: str, metadata: Dict) -> List[str]:
+        """Let AI analyze the query and build perfect JQL."""
         
+        context = f"""
+AVAILABLE JIRA PROJECTS: {[p['key'] + ' (' + p['name'] + ')' for p in metadata.get('projects', [])]}
+AVAILABLE STATUSES: {metadata.get('statuses', [])}
+AVAILABLE PRIORITIES: {metadata.get('priorities', [])}
+AVAILABLE ISSUE TYPES: {metadata.get('issue_types', [])}
+SAMPLE USERS: {[u['displayName'] + ' (' + u['emailAddress'] + ')' for u in metadata.get('users', [])[:10]]}
+"""
+
+        prompt = f"""You are a Jira JQL expert. Analyze this user query and create 3-5 different JQL queries that will find what they're looking for.
+
+USER QUERY: "{user_query}"
+
+JIRA CONTEXT:
+{context}
+
+IMPORTANT JQL GUIDELINES:
+1. Use text search: text ~ "term" (searches all fields)
+2. Use summary search: summary ~ "term" 
+3. Use description search: description ~ "term"
+4. Use comment search: comment ~ "term"
+5. For users, try both displayName and email patterns
+6. For dates, use formats like: created >= -7d, updated >= "2024-01-01"
+7. Always end with: ORDER BY updated DESC
+8. Use AND, OR operators appropriately
+9. For project search: project = "KEY" or project in ("KEY1", "KEY2")
+10. For assignee: assignee ~ "name" or assignee = "email"
+
+EXAMPLES:
+- "rollout restart issues" → text ~ "rollout restart" OR summary ~ "rollout restart"
+- "tickets assigned to john" → assignee ~ "john" OR assignee ~ "John"
+- "high priority bugs" → priority = "High" AND issuetype = "Bug"
+- "bamps project tickets" → project = "BAMPS"
+- "recent issues" → updated >= -7d
+
+CREATE MULTIPLE JQL QUERIES:
+1. Main search query (most specific)
+2. Broader search query (less specific) 
+3. Fallback search query (very broad)
+4. Alternative search approach
+5. Recent items query (if no specific criteria)
+
+OUTPUT FORMAT - Return only JQL queries, one per line:"""
+
         try:
-            logger.info("Generating AI response...")
-            
-            # Format data for prompt
-            confluence_text = self._format_confluence_data(confluence_data)
-            jira_text = self._format_jira_data(jira_data)
-            
-            prompt = f"""You are a helpful CME knowledge assistant. Answer the user's question based on the available data.
-
-USER QUESTION: "{user_query}"
-SELECTED SOURCES: {selected_sources}
-
-CONFLUENCE DATA:
-{confluence_text}
-
-JIRA DATA:
-{jira_text}
-
-Provide a clear, helpful response that:
-1. Directly answers the question
-2. Uses information from the available sources
-3. Is well-formatted with bullet points and sections
-4. Includes relevant ticket links: [TICKET-KEY](https://cmegroup.atlassian.net/browse/TICKET-KEY)
-5. Is professional but conversational
-
-Response:"""
-
             response = self.model.generate_content(
                 prompt,
                 generation_config=GenerationConfig(
-                    temperature=0.3,
-                    max_output_tokens=2000
+                    temperature=0.1,
+                    max_output_tokens=1000,
                 )
             )
             
-            result = response.text if hasattr(response, 'text') else response.candidates[0].text
-            logger.info("AI response generated successfully")
-            return result
+            if hasattr(response, 'text'):
+                jql_text = response.text
+            elif hasattr(response, 'candidates') and response.candidates:
+                jql_text = response.candidates[0].text
+            else:
+                return self._fallback_jql(user_query)
             
+            # Parse JQL queries
+            jql_queries = []
+            for line in jql_text.split('\n'):
+                line = line.strip()
+                if line and not line.startswith('#') and not line.startswith('//'):
+                    # Clean up the line
+                    line = line.replace('```', '').replace('sql', '').replace('jql', '')
+                    line = line.strip('- ').strip('* ').strip('1. ').strip('2. ').strip('3. ').strip('4. ').strip('5. ')
+                    
+                    if len(line) > 10 and ('=' in line or '~' in line or 'ORDER BY' in line):
+                        jql_queries.append(line.strip())
+            
+            if jql_queries:
+                logger.info(f"AI generated {len(jql_queries)} JQL queries")
+                return jql_queries[:5]  # Limit to 5 queries
+            else:
+                return self._fallback_jql(user_query)
+                
         except Exception as e:
-            logger.error(f"AI response generation failed: {e}")
-            return f"I found some information but had trouble formatting the response: {str(e)}"
+            logger.error(f"AI JQL generation error: {e}")
+            return self._fallback_jql(user_query)
     
-    def _format_confluence_data(self, data):
-        """Format Confluence data for AI prompt."""
-        if not data:
-            return "No Confluence data available."
+    def _fallback_jql(self, user_query: str) -> List[str]:
+        """Simple fallback JQL if AI fails."""
+        words = [w for w in user_query.lower().split() if len(w) > 2]
         
-        formatted = "CONFLUENCE DOCUMENTATION:\n"
-        for i, item in enumerate(data[:3], 1):  # Limit to 3 items
-            title = item.get("metadata", {}).get("title", "Unknown")
-            content = item.get("content", "")[:1000]  # Limit content
-            formatted += f"{i}. {title}\n{content}\n\n"
-        
-        return formatted
-    
-    def _format_jira_data(self, data):
-        """Format Jira data for AI prompt."""
-        if not data:
-            return "No Jira data available."
-        
-        formatted = f"JIRA ISSUES ({len(data)} found):\n"
-        for i, issue in enumerate(data[:5], 1):  # Limit to 5 issues
-            key = issue.get("key", "Unknown")
-            fields = issue.get("fields", {})
-            summary = fields.get("summary", "No summary")
-            status = (fields.get("status") or {}).get("name", "Unknown")
+        queries = []
+        if words:
+            main_terms = ' '.join(words[:3])
+            queries.append(f'text ~ "{main_terms}" ORDER BY updated DESC')
             
-            formatted += f"{i}. [{key}] {summary} (Status: {status})\n"
+            for word in words[:2]:
+                queries.append(f'summary ~ "{word}" ORDER BY updated DESC')
         
-        return formatted
+        queries.append('updated >= -30d ORDER BY updated DESC')
+        
+        return queries
 
-class UnifiedKnowledgeAssistant:
-    """Main unified assistant."""
+class GeminiAssistant:
+    """Class for interacting with Gemini models via Vertex AI - FULL VERSION."""
     
     def __init__(self):
-        logger.info("Initializing Unified Knowledge Assistant...")
-        
-        self.confluence = None
-        self.jira = None
-        self.ai = AIAssistant()
-        
-        # Initialize clients
-        self._initialize_clients()
-        
-        logger.info("Unified Knowledge Assistant ready!")
+        vertexai.init(project=PROJECT_ID, location=REGION)
+        self.model = GenerativeModel(MODEL_NAME)
+        logger.info(f"Initialized Gemini Assistant with model: {MODEL_NAME}")
     
-    def _initialize_clients(self):
-        """Initialize Confluence and Jira clients."""
-        # Initialize Confluence
-        if CONFLUENCE_API_TOKEN:
-            try:
-                self.confluence = ConfluenceClient(CONFLUENCE_URL, CONFLUENCE_USERNAME, CONFLUENCE_API_TOKEN)
-            except Exception as e:
-                logger.error(f"Failed to initialize Confluence: {e}")
-        else:
-            logger.warning("Confluence API token not provided")
-        
-        # Initialize Jira
-        if JIRA_API_TOKEN:
-            try:
-                self.jira = JiraClient()
-            except Exception as e:
-                logger.error(f"Failed to initialize Jira: {e}")
-        else:
-            logger.warning("Jira API token not provided")
-    
-    def process_query(self, user_query, selected_sources):
-        """Process user query and return response."""
-        start_time = time.time()
-        logger.info(f"=" * 50)
-        logger.info(f"PROCESSING QUERY: '{user_query}'")
-        logger.info(f"SELECTED SOURCES: {selected_sources}")
-        logger.info(f"=" * 50)
+    def generate_response(self, prompt, RE_context=None):
+        """Generate response from Gemini based on prompt and RE context."""
+        logger.info(f"Generating response for prompt: {prompt}")
         
         try:
-            confluence_data = []
-            jira_data = []
+            system_prompt = """
+You are the friendly CME Unified Knowledge Assistant, an expert on both Confluence documentation and Jira ticket management.
+
+Your personality:
+- Conversational and approachable - use a casual, helpful tone while maintaining workplace professionalism
+- Explain technical concepts in plain language, as if speaking to a colleague
+- Use simple analogies and examples to clarify complex ideas
+- Add occasional light humor where appropriate to make the conversation engaging
+- Be concise but thorough - focus on answering the question directly first, then add helpful context
+
+Your expertise:
+- Deep knowledge of Confluence documentation, procedures, and knowledge base content
+- Understanding of Jira tickets, issues, project tracking, and workflow management
+- Ability to correlate information between documentation and actual implementation
+- Expert in interpreting both structured data (tables, code) and unstructured content (text, procedures)
+
+When answering:
+1. Directly address the user's question first
+2. Provide practical, actionable information when possible
+3. Format tables and structured data clearly to enhance readability
+4. Use bullet points or numbered lists for steps or multiple items
+5. Reference specific examples from the documentation when available
+6. Include relevant ticket links when discussing Jira issues
+7. Acknowledge any limitations in the available information
+
+Remember to maintain a balance between being friendly and professional - you're a helpful colleague, not a formal technical document.
+"""
             
-            # Search Confluence if selected and available
-            if ("confluence" in selected_sources or "both" in selected_sources) and self.confluence:
-                logger.info("🔍 Searching Confluence...")
-                confluence_data = self.confluence.search_content(user_query, limit=3)
-                logger.info(f"✅ Confluence search completed: {len(confluence_data)} results")
+            full_prompt = system_prompt + "\n\n"
+            
+            if RE_context:
+                source_pages = []
+                
+                for line in RE_context.split('\n'):
+                    if line.startswith("URL:"):
+                        source_pages.append(line.replace("URL:", "").strip())
+                
+                if len(RE_context) > 50000:
+                    logger.warning(f"Context too large ({len(RE_context)} chars), trimming...")
+                    paragraphs = RE_context.split('\n\n')
+                    trimmed_context = ""
+                    for para in paragraphs:
+                        if len(trimmed_context) + len(para) + 2 < 50000:
+                            trimmed_context += para + "\n\n"
+                        else:
+                            break
+                    RE_context = trimmed_context
+                
+                if source_pages:
+                    full_prompt += f"CONTEXT INFORMATION:\n{RE_context}\n\n"
+                    full_prompt += f"SOURCE PAGES: {', '.join(source_pages[:5])}\n\n"
+                else:
+                    full_prompt += f"CONTEXT INFORMATION:\n{RE_context}\n\n"
+            
+            full_prompt += f"USER QUESTION: {prompt}\n\nResponse:"
+            
+            generation_config = GenerationConfig(
+                temperature=0.3,
+                top_p=0.95,
+            )
+            
+            response = self.model.generate_content(
+                full_prompt,
+                generation_config=generation_config
+            )
+            
+            if response.candidates and response.candidates[0].text:
+                response_text = response.candidates[0].text.strip()
+                logger.info(f"Successfully generated response ({len(response_text)} chars)")
+                
+                if RE_context and source_pages:
+                    response_text += "\n\n---\n**Sources:**\n"
+                    for i, url in enumerate(source_pages[:5], 1):
+                        response_text += f"{i}. {url}\n"
+                
+                return response_text
             else:
-                logger.info("⏭️  Skipping Confluence (not selected or unavailable)")
-            
-            # Search Jira if selected and available
-            if ("jira" in selected_sources or "both" in selected_sources) and self.jira:
-                logger.info("🎫 Searching Jira...")
-                jira_data = self.jira.search_issues(user_query, max_results=5)
-                logger.info(f"✅ Jira search completed: {len(jira_data)} results")
-            else:
-                logger.info("⏭️  Skipping Jira (not selected or unavailable)")
-            
-            # Generate response
-            logger.info("🤖 Generating AI response...")
-            response = self.ai.generate_response(user_query, confluence_data, jira_data, selected_sources)
-            
-            elapsed = time.time() - start_time
-            logger.info(f"✅ Query completed in {elapsed:.2f} seconds")
-            logger.info(f"📝 Response length: {len(response)} characters")
-            
-            return response
-            
+                logger.warning("No response generated from Gemini")
+                return "I couldn't find a specific answer to that question in our documentation. Could you try rephrasing, or maybe I can help you find what you're looking for?"
+                
         except Exception as e:
-            logger.error(f"❌ Error processing query: {e}", exc_info=True)
-            return f"I encountered an error while processing your query: {str(e)}. Please try again or contact support."
+            logger.error(f"Error generating response: {str(e)}")
+            return "I ran into a technical issue while looking that up. Let me know if you'd like to try a different question or approach."
+
+class REAssistant:
+    """Main class that coordinates between Confluence and Jira - FULL VERSION."""
     
-    def get_status(self):
-        """Get system status with page count."""
-        logger.info("Checking system status...")
+    def __init__(self, confluence_url, confluence_username, confluence_api_token, space_key=None, all_spaces=False):
+        self.confluence = ConfluenceClient(confluence_url, confluence_username, confluence_api_token)
+        self.jira = SafeJiraClient()
+        self.gemini = GeminiAssistant()
+        self.jira_analyzer = AIJiraAnalyzer()
+        self.space_key = space_key
+        self.all_spaces = all_spaces
+        self.space_pages = {}
+        self.page_content_cache = {}
+        logger.info(f"Initialized RE Assistant targeting {'all spaces' if all_spaces else f'space: {space_key}'}")
+    
+    def initialize(self):
+        """Initialize by testing connections and gathering initial content."""
+        confluence_ok = self.confluence.test_connection()
+        jira_ok = self.jira.test_connection()
         
-        confluence_status = False
-        jira_status = False
-        confluence_pages = 0
+        if not confluence_ok and not jira_ok:
+            logger.error("Failed to connect to both Confluence and Jira. Check credentials and URLs.")
+            return False
         
-        if self.confluence:
-            confluence_status = self.confluence.test_connection()
-            if confluence_status:
+        if confluence_ok:
+            logger.info("Loading Confluence space content...")
+            self.load_space_content()
+        
+        return True
+    
+    def load_space_content(self):
+        """Load metadata for all pages in the specified space(s)."""
+        cache_file = f"{'all_spaces' if self.all_spaces else self.space_key}_pages_cache.json"
+        
+        if os.path.exists(cache_file):
+            try:
+                with open(cache_file, 'r') as f:
+                    cached_data = json.load(f)
+                    if cached_data.get('timestamp', 0) > time.time() - 86400:  # 24 hours
+                        self.space_pages = cached_data.get('pages', {})
+                        logger.info(f"Loaded {sum(len(pages) for pages in self.space_pages.values())} pages from cache")
+                        return
+            except Exception as e:
+                logger.warning(f"Error reading cache file: {str(e)}")
+        
+        if self.all_spaces:
+            spaces = self.confluence.get_all_spaces()
+            logger.info(f"Found {len(spaces)} accessible spaces")
+            
+            for space in spaces:
+                space_key = space['key']
+                logger.info(f"Fetching pages from space: {space_key} ({space['name']})")
+                
+                pages = self.confluence.get_all_pages_in_space(space_key)
+                if pages:
+                    self.space_pages[space_key] = pages
+                    logger.info(f"Loaded {len(pages)} pages from space {space_key}")
+                
+                time.sleep(0.5)
+        else:
+            if not self.space_key:
+                logger.error("No space key specified. Please provide a space key.")
+                return
+            
+            pages = self.confluence.get_all_pages_in_space(self.space_key)
+            if pages:
+                self.space_pages[self.space_key] = pages
+                logger.info(f"Loaded {len(pages)} pages from space {self.space_key}")
+        
+        try:
+            with open(cache_file, 'w') as f:
+                json.dump({
+                    'timestamp': time.time(),
+                    'pages': self.space_pages
+                }, f)
+            logger.info(f"Cached {sum(len(pages) for pages in self.space_pages.values())} pages to {cache_file}")
+        except Exception as e:
+            logger.warning(f"Error writing cache file: {str(e)}")
+    
+    def fetch_page_content_batch(self, pages):
+        """Fetch content for a batch of pages in parallel."""
+        results = {}
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+            future_to_page = {
+                executor.submit(self.confluence.get_page_content, page["id"], "body.storage,metadata.labels"): page 
+                for page in pages
+            }
+            
+            for future in concurrent.futures.as_completed(future_to_page):
+                page = future_to_page[future]
                 try:
-                    # Try to get page count
-                    response = requests.get(
-                        f"{self.confluence.base_url}/rest/api/content",
-                        params={"spaceKey": CONFLUENCE_SPACE, "limit": 1},
-                        auth=self.confluence.auth,
-                        timeout=5,
-                        verify=False
-                    )
-                    if response.status_code == 200:
-                        data = response.json()
-                        confluence_pages = data.get("size", 0)
-                except:
-                    pass
+                    content = future.result()
+                    if content:
+                        results[page["id"]] = content
+                except Exception as e:
+                    logger.error(f"Error in page content fetching task for {page['id']}: {str(e)}")
         
-        if self.jira:
-            jira_status = self.jira.test_connection()
+        return results
+    
+    def extract_relevant_content(self, query):
+        """Extract content from pages that is most relevant to the query."""
+        if not self.space_pages:
+            return "No pages found in the specified Confluence space(s)."
         
-        status = {
-            'confluence': confluence_status,
-            'jira': jira_status,
-            'confluence_pages': confluence_pages,
-            'status': 'healthy' if confluence_status or jira_status else 'degraded'
+        all_pages = []
+        for space_key, pages in self.space_pages.items():
+            for page in pages:
+                page_with_space = page.copy()
+                page_with_space['space_key'] = space_key
+                all_pages.append(page_with_space)
+        
+        query_words = set(re.findall(r'\b\w+\b', query.lower()))
+        
+        domain_terms = {
+            "RE", "SRE", "LOGS", "MAINTENANCE", "API", "REST", "DATABASE",
+            "VIEW", "TABLE", "FIELD", "ENDPOINT", "MAPPING", "SCHEMA", "BAMPS",
+            "ROLLOUT", "RESTART", "SYSTEM", "ERROR", "ISSUE", "BUG", "TICKET"
         }
         
-        logger.info(f"System status: {status}")
-        return status
+        if len(query_words) < 3:
+            query_words.update(domain_terms)
+        
+        candidates = []
+        for page in all_pages:
+            title = page.get("title", "").lower()
+            title_score = sum(1 for word in query_words if word in title)
+            
+            if title_score > 0 or any(term in title for term in domain_terms):
+                candidates.append((page, title_score))
+        
+        candidates.sort(key=lambda x: x[1], reverse=True)
+        top_candidates = candidates[:20]
+        
+        logger.info(f"Selected {len(top_candidates)} candidate pages for detailed analysis")
+        
+        if not top_candidates:
+            recent_pages = sorted(all_pages, 
+                                key=lambda p: p.get("history", {}).get("lastUpdated", {}).get("when", "2000-01-01"),
+                                reverse=True)[:10]
+            top_candidates = [(p, 0) for p in recent_pages]
+        
+        page_dict = {p[0]["id"]: p[0] for p in top_candidates}
+        candidate_pages = list(page_dict.values())
+        
+        page_contents = self.fetch_page_content_batch(candidate_pages)
+        
+        scored_pages = []
+        for page_id, content in page_contents.items():
+            page = page_dict[page_id]
+            page_text = content.get("content", "").lower()
+            title = page.get("title", "").lower()
+            
+            score = 0
+            
+            for word in query_words:
+                word_count = page_text.count(word)
+                score += word_count * 0.1
+            
+            if word in title:
+                score += 5
+            
+            query_lower = query.lower()
+            if query_lower in page_text:
+                score += 50
+            else:
+                for phrase_len in range(2, 5):
+                    if len(query_words) >= phrase_len:
+                        query_phrases = [" ".join(query_lower.split()[i:i+phrase_len]) 
+                                       for i in range(len(query_lower.split()) - phrase_len + 1)]
+                        for phrase in query_phrases:
+                            if len(phrase.split()) >= 2 and phrase in page_text:
+                                score += 3 * page_text.count(phrase)
+            
+            if "TABLE" in page_text:
+                score += 1.5
+            if "```" in page_text:
+                score += 1.3
+            
+            code_terms = ["code", "example", "implementation", "syntax", "usage"]
+            if any(term in query_lower for term in code_terms) and "```" in page_text:
+                score += 5
+            
+            image_terms = ["image", "diagram", "screenshot", "picture"]
+            if any(term in query_lower for term in image_terms) and "[IMAGE" in page_text:
+                score += 3
+            
+            scored_pages.append((page, content, score))
+        
+        scored_pages.sort(key=lambda x: x[2], reverse=True)
+        top_pages = scored_pages[:6]
+        
+        logger.info(f"Selected {len(top_pages)} most relevant pages")
+        
+        if not top_pages:
+            return "I couldn't find any relevant information in the Confluence space(s)."
+        
+        relevant_content = []
+        source_urls = []
+        
+        for page, content, score in top_pages:
+            page_content = content.get("content", "")
+            page_url = content.get("metadata", {}).get("url", "")
+            page_title = page.get("title", "")
+            space_key = page.get("space_key", "")
+            
+            if page_url:
+                source_urls.append(page_url)
+            
+            sections = re.split(r'#+\s+', page_content)
+            
+            if len(sections) <= 2:
+                sections = page_content.split('\n\n')
+            
+            section_scores = []
+            for i, section in enumerate(sections):
+                if not section.strip():
+                    continue
+                
+                section_lower = section.lower()
+                section_score = 0
+                
+                for word in query_words:
+                    freq = section_lower.count(word)
+                    section_score += freq * 0.5
+                
+                if query_lower in section_lower:
+                    section_score += 10
+                
+                for phrase_len in range(2, 5):
+                    if len(query_words) >= phrase_len:
+                        query_phrases = [" ".join(query_lower.split()[i:i+phrase_len]) 
+                                       for i in range(len(query_lower.split()) - phrase_len + 1)]
+                        for phrase in query_phrases:
+                            if phrase in section_lower:
+                                section_score += 2
+                
+                if "TABLE" in section:
+                    section_score *= 1.5
+                if "```" in section:
+                    section_score *= 1.3
+                
+                section_scores.append((i, section, section_score))
+            
+            section_scores.sort(key=lambda x: x[2], reverse=True)
+            top_sections = section_scores[:3]
+            
+            if top_sections:
+                ordered_sections = sorted(top_sections, key=lambda x: x[0])
+                
+                if ordered_sections:
+                    content_block = f"--- FROM: {page_title} (Space: {space_key}) ---\n\n"
+                    
+                    first_section = ordered_sections[0][1].strip()
+                    if not first_section.startswith('#'):
+                        content_block += f"# {page_title}\n\n"
+                    
+                    for _, section, _ in ordered_sections:
+                        cleaned_section = re.sub(r'\n{3,}', '\n\n', section.strip())
+                        content_block += cleaned_section + "\n\n"
+                    
+                    content_block += f"Source: {page_url}\n"
+                    relevant_content.append(content_block)
+        
+        combined_content = "\n\n".join(relevant_content)
+        
+        if source_urls:
+            combined_content = f"SOURCES: {', '.join(source_urls[:5])}\n\n" + combined_content
+        
+        return combined_content
+    
+    def search_jira_tickets(self, question):
+        """Search Jira tickets using AI-powered JQL generation."""
+        logger.info(f"Searching Jira for: {question}")
+        
+        try:
+            metadata = self.jira.get_jira_metadata()
+            jql_queries = self.jira_analyzer.analyze_query_and_build_jql(question, metadata)
+            
+            all_results = []
+            for jql in jql_queries:
+                results = self.jira.execute_jql(jql, max_results=50)
+                all_results.extend(results)
+            
+            unique_results = []
+            seen_keys = set()
+            for issue in all_results:
+                if issue:
+                    key = issue.get('key')
+                    if key and key not in seen_keys:
+                        seen_keys.add(key)
+                        unique_results.append(issue)
+            
+            logger.info(f"Found {len(unique_results)} unique Jira issues")
+            return unique_results
+            
+        except Exception as e:
+            logger.error(f"Error searching Jira: {e}")
+            return []
+    
+    def answer_question(self, question, selected_sources):
+        """Answer a question using Confluence content and/or Jira tickets."""
+        logger.info(f"Processing question: {question} with sources: {selected_sources}")
+        
+        confluence_content = ""
+        jira_content = ""
+        
+        # Search Confluence if selected
+        if "confluence" in selected_sources or "both" in selected_sources:
+            try:
+                confluence_content = self.extract_relevant_content(question)
+                logger.info(f"Confluence content extracted: {len(confluence_content)} chars")
+            except Exception as e:
+                logger.error(f"Error extracting Confluence content: {e}")
+        
+        # Search Jira if selected
+        if "jira" in selected_sources or "both" in selected_sources:
+            try:
+                jira_results = self.search_jira_tickets(question)
+                if jira_results:
+                    jira_summary = f"JIRA RESULTS ({len(jira_results)} tickets found):\n"
+                    for i, issue in enumerate(jira_results[:10], 1):
+                        key = issue.get('key', 'Unknown')
+                        fields = issue.get('fields', {})
+                        summary = fields.get('summary', 'No summary')[:100]
+                        status = (fields.get('status') or {}).get('name', 'Unknown')
+                        priority = (fields.get('priority') or {}).get('name', 'Unknown')
+                        assignee = (fields.get('assignee') or {}).get('displayName', 'Unassigned')
+                        
+                        jira_summary += f"{i}. [{key}](https://cmegroup.atlassian.net/browse/{key}) - {summary}\n"
+                        jira_summary += f"   Status: {status} | Priority: {priority} | Assignee: {assignee}\n\n"
+                    
+                    jira_content = jira_summary
+                    logger.info(f"Jira content prepared: {len(jira_content)} chars")
+            except Exception as e:
+                logger.error(f"Error searching Jira: {e}")
+        
+        # Combine content for AI
+        combined_context = ""
+        if confluence_content and jira_content:
+            combined_context = f"CONFLUENCE DOCUMENTATION:\n{confluence_content}\n\n{jira_content}"
+        elif confluence_content:
+            combined_context = f"CONFLUENCE DOCUMENTATION:\n{confluence_content}"
+        elif jira_content:
+            combined_context = jira_content
+        
+        # Generate AI response
+        if combined_context:
+            response = self.gemini.generate_response(question, combined_context)
+        else:
+            response = "I couldn't find relevant information in the selected sources. Please try a different query or check your source selection."
+        
+        return response
 
 # Flask Application
 app = Flask(__name__)
@@ -569,7 +1267,13 @@ CORS(app)
 
 # Initialize the assistant
 logger.info("🚀 Starting CME Unified Knowledge Assistant...")
-assistant = UnifiedKnowledgeAssistant()
+assistant = REAssistant(
+    CONFLUENCE_URL, 
+    CONFLUENCE_USERNAME, 
+    CONFLUENCE_API_TOKEN, 
+    space_key=CONFLUENCE_SPACE,
+    all_spaces=CONFLUENCE_ALL_SPACES
+)
 
 @app.route('/')
 def index():
@@ -580,7 +1284,9 @@ def index():
 def chat():
     """Handle chat requests with detailed logging."""
     request_start = time.time()
-    logger.info("📨 Received chat request")
+    logger.info("=" * 60)
+    logger.info("📨 NEW CHAT REQUEST RECEIVED")
+    logger.info("=" * 60)
     
     try:
         data = request.get_json()
@@ -591,11 +1297,11 @@ def chat():
         user_query = data.get('message', '').strip()
         selected_sources = data.get('sources', [])
         
-        logger.info(f"📝 User Query: '{user_query}'")
-        logger.info(f"📊 Sources: {selected_sources}")
+        logger.info(f"📝 USER QUERY: '{user_query}'")
+        logger.info(f"📊 SELECTED SOURCES: {selected_sources}")
         
         if not user_query:
-            logger.warning("❌ Empty message")
+            logger.warning("❌ Empty message received")
             return jsonify({'error': 'No message provided'}), 400
         
         if not selected_sources:
@@ -622,46 +1328,60 @@ def chat():
 
 What would you like to explore? 🤔"""
             
-            logger.info("✅ Responded with greeting")
+            logger.info("✅ RESPONDED WITH GREETING")
             return jsonify({'response': response})
         
         if any(word in query_lower for word in ['bye', 'goodbye', 'thanks']):
             response = "👋 **Goodbye!** Feel free to come back anytime for insights across CME's knowledge systems! 🚀"
-            logger.info("✅ Responded with goodbye")
+            logger.info("✅ RESPONDED WITH GOODBYE")
             return jsonify({'response': response})
         
         # Process the actual query
-        logger.info("🔄 Processing query with assistant...")
-        response = assistant.process_query(user_query, selected_sources)
+        logger.info("🔄 PROCESSING QUERY WITH ASSISTANT...")
+        response = assistant.answer_question(user_query, selected_sources)
         
         request_time = time.time() - request_start
-        logger.info(f"✅ Chat request completed in {request_time:.2f} seconds")
+        logger.info(f"✅ CHAT REQUEST COMPLETED in {request_time:.2f} seconds")
+        logger.info(f"📝 RESPONSE LENGTH: {len(response)} characters")
+        logger.info("=" * 60)
         
         return jsonify({'response': response})
         
     except Exception as e:
-        logger.error(f"❌ Error in chat endpoint: {e}", exc_info=True)
+        logger.error(f"❌ ERROR IN CHAT ENDPOINT: {e}", exc_info=True)
         return jsonify({'error': f'Internal server error: {str(e)}'}), 500
 
 @app.route('/api/status')
 def status():
     """Check system status."""
-    logger.info("📊 Status check requested")
+    logger.info("📊 STATUS CHECK REQUESTED")
     try:
-        status_data = assistant.get_status()
+        confluence_status = assistant.confluence.test_connection() if assistant.confluence else False
+        jira_status = assistant.jira.test_connection() if assistant.jira else False
+        confluence_pages = sum(len(pages) for pages in assistant.space_pages.values())
+        
+        status_data = {
+            'confluence': confluence_status,
+            'jira': jira_status,
+            'confluence_pages': confluence_pages,
+            'status': 'healthy' if confluence_status or jira_status else 'degraded'
+        }
+        
+        logger.info(f"📊 STATUS: {status_data}")
         return jsonify(status_data)
+        
     except Exception as e:
-        logger.error(f"❌ Error in status endpoint: {e}")
+        logger.error(f"❌ ERROR IN STATUS ENDPOINT: {e}")
         return jsonify({'error': str(e)}), 500
 
 @app.errorhandler(404)
 def not_found(error):
-    logger.warning(f"404 error: {request.url}")
+    logger.warning(f"404 ERROR: {request.url}")
     return jsonify({'error': 'Not found'}), 404
 
 @app.errorhandler(500)
 def internal_error(error):
-    logger.error(f"500 error: {error}")
+    logger.error(f"500 ERROR: {error}")
     return jsonify({'error': 'Internal server error'}), 500
 
 if __name__ == '__main__':
@@ -673,2186 +1393,12 @@ if __name__ == '__main__':
     print(f"📊 Jira Token: {'✅ SET' if JIRA_API_TOKEN else '❌ MISSING'}")
     print("=" * 50)
     
+    # Initialize the assistant
+    if not assistant.initialize():
+        print("❌ Failed to initialize assistant. Check your configuration.")
+        sys.exit(1)
+    
+    print("✅ Assistant initialized successfully!")
+    print("🌐 Starting Flask server...")
+    
     app.run(debug=True, host='0.0.0.0', port=5000)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-/* Reset and Base Styles */
-* {
-    margin: 0;
-    padding: 0;
-    box-sizing: border-box;
-}
-
-:root {
-    /* CME Blue Gradient Colors */
-    --primary-blue: #1e3a8a;
-    --secondary-blue: #3b82f6;
-    --light-blue: #60a5fa;
-    --accent-blue: #93c5fd;
-    --soft-blue: #dbeafe;
-    --white: #ffffff;
-    --off-white: #f8fafc;
-    --gray-100: #f1f5f9;
-    --gray-200: #e2e8f0;
-    --gray-300: #cbd5e1;
-    --gray-400: #94a3b8;
-    --gray-500: #64748b;
-    --gray-600: #475569;
-    --gray-700: #334155;
-    --gray-800: #1e293b;
-    --gray-900: #0f172a;
-    
-    /* Gradients */
-    --primary-gradient: linear-gradient(135deg, #1e3a8a 0%, #3b82f6 50%, #60a5fa 100%);
-    --secondary-gradient: linear-gradient(135deg, #60a5fa 0%, #93c5fd 50%, #dbeafe 100%);
-    --background-gradient: linear-gradient(135deg, #f8fafc 0%, #e2e8f0 25%, #dbeafe 50%, #ffffff 100%);
-    --header-gradient: linear-gradient(135deg, #1e3a8a 0%, #3b82f6 100%);
-    --card-gradient: linear-gradient(135deg, rgba(255,255,255,0.95) 0%, rgba(248,250,252,0.9) 100%);
-    
-    /* Shadows */
-    --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
-    --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
-    --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
-    --shadow-xl: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
-    --shadow-blue: 0 10px 25px -5px rgba(59, 130, 246, 0.3);
-    
-    /* Transitions */
-    --transition-fast: 0.15s ease-out;
-    --transition-normal: 0.3s ease-out;
-    --transition-slow: 0.5s ease-out;
-    
-    /* Fonts */
-    --font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-}
-
-body {
-    font-family: var(--font-family);
-    background: var(--background-gradient);
-    min-height: 100vh;
-    overflow-x: hidden;
-    color: var(--gray-800);
-    line-height: 1.6;
-}
-
-/* Background Pattern */
-.background-pattern {
-    position: fixed;
-    top: 0;
-    left: 0;
-    width: 100%;
-    height: 100%;
-    z-index: -2;
-    opacity: 0.03;
-}
-
-.cme-logo-pattern {
-    position: absolute;
-    top: 0;
-    left: 0;
-    width: 100%;
-    height: 100%;
-    background-image: 
-        radial-gradient(circle at 20% 80%, var(--primary-blue) 2px, transparent 2px),
-        radial-gradient(circle at 80% 20%, var(--secondary-blue) 2px, transparent 2px),
-        radial-gradient(circle at 40% 40%, var(--light-blue) 1px, transparent 1px);
-    background-size: 100px 100px, 80px 80px, 60px 60px;
-    background-repeat: repeat;
-}
-
-.gradient-overlay {
-    position: absolute;
-    top: 0;
-    left: 0;
-    width: 100%;
-    height: 100%;
-    background: var(--background-gradient);
-    z-index: -1;
-}
-
-/* Status Indicator */
-.status-indicator {
-    position: fixed;
-    top: 20px;
-    right: 20px;
-    background: rgba(255, 255, 255, 0.95);
-    backdrop-filter: blur(10px);
-    padding: 8px 16px;
-    border-radius: 25px;
-    box-shadow: var(--shadow-md);
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    z-index: 1000;
-    font-size: 14px;
-    font-weight: 500;
-    transition: var(--transition-normal);
-}
-
-.status-dot {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    background: var(--gray-400);
-    transition: var(--transition-normal);
-}
-
-.status-indicator.connected .status-dot {
-    background: #10b981;
-    box-shadow: 0 0 0 2px rgba(16, 185, 129, 0.2);
-}
-
-.status-indicator.degraded .status-dot {
-    background: #f59e0b;
-    box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.2);
-}
-
-.status-indicator.error .status-dot {
-    background: #ef4444;
-    box-shadow: 0 0 0 2px rgba(239, 68, 68, 0.2);
-}
-
-/* Main Container */
-.main-container {
-    max-width: 1400px;
-    margin: 0 auto;
-    padding: 20px;
-    min-height: 100vh;
-    display: flex;
-    flex-direction: column;
-}
-
-/* Header */
-.header {
-    background: var(--header-gradient);
-    border-radius: 20px;
-    padding: 30px;
-    margin-bottom: 30px;
-    color: white;
-    box-shadow: var(--shadow-blue);
-    position: relative;
-    overflow: hidden;
-}
-
-.header::before {
-    content: '';
-    position: absolute;
-    top: 0;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    background: url('data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><defs><pattern id="grid" width="10" height="10" patternUnits="userSpaceOnUse"><path d="M 10 0 L 0 0 0 10" fill="none" stroke="rgba(255,255,255,0.1)" stroke-width="0.5"/></pattern></defs><rect width="100" height="100" fill="url(%23grid)"/></svg>');
-    opacity: 0.5;
-}
-
-.header-content {
-    position: relative;
-    z-index: 2;
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: 20px;
-}
-
-.logo-section {
-    display: flex;
-    align-items: center;
-    gap: 20px;
-}
-
-.cme-logo {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    font-size: 24px;
-    font-weight: 700;
-    background: rgba(255, 255, 255, 0.2);
-    padding: 15px 20px;
-    border-radius: 15px;
-    backdrop-filter: blur(10px);
-}
-
-.cme-logo i {
-    font-size: 28px;
-}
-
-.title-section h1 {
-    font-size: 2.5rem;
-    font-weight: 700;
-    margin-bottom: 5px;
-    background: linear-gradient(45deg, #ffffff, #dbeafe);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    background-clip: text;
-}
-
-.subtitle {
-    font-size: 1.1rem;
-    opacity: 0.9;
-    font-weight: 400;
-}
-
-/* Source Selector */
-.source-selector {
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-}
-
-.selector-label {
-    font-size: 14px;
-    font-weight: 600;
-    opacity: 0.9;
-}
-
-.source-options {
-    display: flex;
-    gap: 15px;
-}
-
-.source-option {
-    position: relative;
-}
-
-.source-option input[type="checkbox"] {
-    position: absolute;
-    opacity: 0;
-    pointer-events: none;
-}
-
-.source-option label {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 12px 18px;
-    background: rgba(255, 255, 255, 0.2);
-    border: 2px solid rgba(255, 255, 255, 0.3);
-    border-radius: 12px;
-    cursor: pointer;
-    transition: var(--transition-normal);
-    font-weight: 500;
-    user-select: none;
-    backdrop-filter: blur(10px);
-}
-
-.source-option input[type="checkbox"]:checked + label {
-    background: rgba(255, 255, 255, 0.3);
-    border-color: rgba(255, 255, 255, 0.8);
-    transform: translateY(-2px);
-    box-shadow: 0 5px 15px rgba(0, 0, 0, 0.2);
-}
-
-.source-option label:hover {
-    background: rgba(255, 255, 255, 0.25);
-    transform: translateY(-1px);
-}
-
-/* Chat Container */
-.chat-container {
-    flex: 1;
-    background: var(--card-gradient);
-    border-radius: 20px;
-    box-shadow: var(--shadow-xl);
-    margin-bottom: 20px;
-    overflow: hidden;
-    display: flex;
-    flex-direction: column;
-    backdrop-filter: blur(20px);
-    border: 1px solid rgba(255, 255, 255, 0.2);
-}
-
-.chat-header {
-    background: rgba(255, 255, 255, 0.8);
-    padding: 20px 30px;
-    border-bottom: 1px solid var(--gray-200);
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    backdrop-filter: blur(10px);
-}
-
-.chat-title {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    font-size: 1.2rem;
-    font-weight: 600;
-    color: var(--gray-800);
-}
-
-.chat-title i {
-    color: var(--secondary-blue);
-    font-size: 1.3rem;
-}
-
-.clear-chat {
-    background: none;
-    border: 2px solid var(--gray-300);
-    color: var(--gray-600);
-    padding: 8px 16px;
-    border-radius: 10px;
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    font-size: 14px;
-    font-weight: 500;
-    transition: var(--transition-normal);
-}
-
-.clear-chat:hover {
-    border-color: var(--secondary-blue);
-    color: var(--secondary-blue);
-    transform: translateY(-1px);
-}
-
-/* Welcome Section */
-.welcome-section {
-    padding: 60px 30px;
-    text-align: center;
-    background: linear-gradient(135deg, rgba(59, 130, 246, 0.05) 0%, rgba(147, 197, 253, 0.05) 100%);
-}
-
-.welcome-content {
-    max-width: 600px;
-    margin: 0 auto;
-}
-
-.welcome-icon {
-    width: 80px;
-    height: 80px;
-    background: var(--primary-gradient);
-    border-radius: 50%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    margin: 0 auto 30px;
-    box-shadow: var(--shadow-blue);
-}
-
-.welcome-icon i {
-    font-size: 36px;
-    color: white;
-}
-
-.welcome-content h2 {
-    font-size: 2.2rem;
-    font-weight: 700;
-    color: var(--gray-800);
-    margin-bottom: 15px;
-    background: var(--primary-gradient);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    background-clip: text;
-}
-
-.welcome-content p {
-    font-size: 1.1rem;
-    color: var(--gray-600);
-    margin-bottom: 40px;
-}
-
-.example-queries h3 {
-    font-size: 1.3rem;
-    font-weight: 600;
-    color: var(--gray-800);
-    margin-bottom: 20px;
-}
-
-.query-examples {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
-    gap: 15px;
-    margin-top: 20px;
-}
-
-.example-query {
-    background: rgba(255, 255, 255, 0.7);
-    border: 2px solid var(--gray-200);
-    border-radius: 15px;
-    padding: 20px;
-    cursor: pointer;
-    transition: var(--transition-normal);
-    display: flex;
-    align-items: center;
-    gap: 12px;
-    text-align: left;
-    font-weight: 500;
-    color: var(--gray-700);
-    backdrop-filter: blur(10px);
-}
-
-.example-query:hover {
-    border-color: var(--secondary-blue);
-    background: rgba(255, 255, 255, 0.9);
-    transform: translateY(-3px);
-    box-shadow: var(--shadow-lg);
-}
-
-.example-query i {
-    color: var(--secondary-blue);
-    font-size: 18px;
-    flex-shrink: 0;
-}
-
-/* Chat Messages */
-.chat-messages {
-    flex: 1;
-    padding: 20px 30px;
-    overflow-y: auto;
-    max-height: 500px;
-    display: flex;
-    flex-direction: column;
-    gap: 20px;
-}
-
-.message {
-    display: flex;
-    gap: 15px;
-    margin-bottom: 20px;
-    opacity: 1;
-    transform: translateY(0);
-    transition: opacity 0.5s ease, transform 0.5s ease;
-}
-
-.message.user {
-    flex-direction: row-reverse;
-}
-
-.message-avatar {
-    width: 40px;
-    height: 40px;
-    border-radius: 50%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    flex-shrink: 0;
-    font-size: 18px;
-    color: white;
-    font-weight: 600;
-}
-
-.message.user .message-avatar {
-    background: var(--primary-gradient);
-}
-
-.message.assistant .message-avatar {
-    background: linear-gradient(135deg, #10b981, #34d399);
-}
-
-.message-content {
-    flex: 1;
-    max-width: 70%;
-    word-wrap: break-word;
-    overflow-wrap: break-word;
-}
-
-.message.user .message-content {
-    text-align: right;
-}
-
-.message-bubble {
-    background: rgba(255, 255, 255, 0.9);
-    border: 1px solid var(--gray-200);
-    border-radius: 18px;
-    padding: 16px 20px;
-    backdrop-filter: blur(10px);
-    box-shadow: var(--shadow-sm);
-    word-wrap: break-word;
-    overflow-wrap: break-word;
-    line-height: 1.6;
-}
-
-.message.user .message-bubble {
-    background: var(--secondary-gradient);
-    color: white;
-    border-color: transparent;
-}
-
-.message-time {
-    font-size: 12px;
-    color: var(--gray-500);
-    margin-top: 5px;
-}
-
-.message.user .message-time {
-    color: rgba(255, 255, 255, 0.8);
-}
-
-/* Typing Indicator */
-.typing-indicator {
-    display: none;
-    align-items: center;
-    gap: 15px;
-    padding: 15px 30px;
-    background: rgba(59, 130, 246, 0.05);
-    border-top: 1px solid var(--gray-200);
-}
-
-.typing-indicator.show {
-    display: flex;
-}
-
-.typing-dots {
-    display: flex;
-    gap: 4px;
-}
-
-.typing-dots span {
-    width: 8px;
-    height: 8px;
-    background: var(--secondary-blue);
-    border-radius: 50%;
-    animation: typingBounce 1.4s infinite ease-in-out;
-}
-
-.typing-dots span:nth-child(1) { animation-delay: -0.32s; }
-.typing-dots span:nth-child(2) { animation-delay: -0.16s; }
-
-.typing-text {
-    color: var(--gray-600);
-    font-style: italic;
-}
-
-/* Input Section */
-.input-section {
-    background: rgba(255, 255, 255, 0.95);
-    border-radius: 20px;
-    box-shadow: var(--shadow-xl);
-    backdrop-filter: blur(20px);
-    border: 1px solid rgba(255, 255, 255, 0.2);
-}
-
-.input-container {
-    padding: 25px 30px;
-}
-
-.input-wrapper {
-    display: flex;
-    align-items: flex-end;
-    gap: 15px;
-    background: rgba(255, 255, 255, 0.8);
-    border: 2px solid var(--gray-200);
-    border-radius: 15px;
-    padding: 15px 20px;
-    transition: var(--transition-normal);
-    backdrop-filter: blur(10px);
-}
-
-.input-wrapper:focus-within {
-    border-color: var(--secondary-blue);
-    box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
-}
-
-#messageInput {
-    flex: 1;
-    border: none;
-    outline: none;
-    background: none;
-    font-size: 16px;
-    font-family: var(--font-family);
-    color: var(--gray-800);
-    resize: none;
-    max-height: 120px;
-    min-height: 24px;
-    line-height: 1.5;
-}
-
-#messageInput::placeholder {
-    color: var(--gray-500);
-}
-
-.input-actions {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-}
-
-.character-count {
-    font-size: 12px;
-    color: var(--gray-500);
-    font-weight: 500;
-}
-
-.send-button {
-    width: 44px;
-    height: 44px;
-    background: var(--primary-gradient);
-    border: none;
-    border-radius: 12px;
-    color: white;
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 16px;
-    transition: var(--transition-normal);
-    box-shadow: var(--shadow-md);
-}
-
-.send-button:disabled {
-    background: var(--gray-300);
-    cursor: not-allowed;
-    box-shadow: none;
-}
-
-.send-button:not(:disabled):hover {
-    transform: translateY(-2px);
-    box-shadow: var(--shadow-blue);
-}
-
-.input-hints {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-top: 15px;
-    font-size: 14px;
-    color: var(--gray-600);
-}
-
-.hint-item, .selected-sources {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-}
-
-.hint-item i, .selected-sources i {
-    color: var(--secondary-blue);
-}
-
-#sourcesList {
-    font-weight: 600;
-    color: var(--secondary-blue);
-}
-
-/* Loading Overlay */
-.loading-overlay {
-    position: fixed;
-    top: 0;
-    left: 0;
-    width: 100%;
-    height: 100%;
-    background: rgba(255, 255, 255, 0.95);
-    backdrop-filter: blur(10px);
-    display: none;
-    align-items: center;
-    justify-content: center;
-    z-index: 9999;
-}
-
-.loading-overlay.show {
-    display: flex;
-}
-
-.loading-content {
-    text-align: center;
-    background: rgba(255, 255, 255, 0.9);
-    padding: 40px;
-    border-radius: 20px;
-    box-shadow: var(--shadow-xl);
-    backdrop-filter: blur(20px);
-}
-
-.loading-spinner {
-    width: 60px;
-    height: 60px;
-    border: 4px solid var(--gray-200);
-    border-top: 4px solid var(--secondary-blue);
-    border-radius: 50%;
-    animation: spin 1s linear infinite;
-    margin: 0 auto 20px;
-}
-
-.loading-text h3 {
-    font-size: 1.4rem;
-    font-weight: 600;
-    color: var(--gray-800);
-    margin-bottom: 10px;
-}
-
-.loading-text p {
-    color: var(--gray-600);
-}
-
-/* Toast Notifications */
-.toast-container {
-    position: fixed;
-    top: 80px;
-    right: 20px;
-    z-index: 10000;
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-}
-
-.toast {
-    background: rgba(255, 255, 255, 0.95);
-    border-left: 4px solid var(--secondary-blue);
-    border-radius: 10px;
-    padding: 15px 20px;
-    box-shadow: var(--shadow-lg);
-    backdrop-filter: blur(10px);
-    transform: translateX(400px);
-    animation: slideInRight 0.3s ease-out forwards;
-    max-width: 350px;
-}
-
-.toast.error {
-    border-left-color: #ef4444;
-}
-
-.toast.success {
-    border-left-color: #10b981;
-}
-
-.toast.warning {
-    border-left-color: #f59e0b;
-}
-
-/* Floating Help */
-.floating-help {
-    position: fixed;
-    bottom: 30px;
-    left: 30px;
-    width: 50px;
-    height: 50px;
-    background: var(--primary-gradient);
-    border-radius: 50%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: white;
-    cursor: pointer;
-    box-shadow: var(--shadow-lg);
-    transition: var(--transition-normal);
-    z-index: 1000;
-}
-
-.floating-help:hover {
-    transform: scale(1.1);
-    box-shadow: var(--shadow-blue);
-}
-
-.help-tooltip {
-    position: absolute;
-    bottom: 60px;
-    left: 0;
-    background: rgba(255, 255, 255, 0.95);
-    border-radius: 15px;
-    padding: 20px;
-    box-shadow: var(--shadow-xl);
-    backdrop-filter: blur(20px);
-    border: 1px solid var(--gray-200);
-    width: 300px;
-    opacity: 0;
-    visibility: hidden;
-    transform: translateY(10px);
-    transition: var(--transition-normal);
-}
-
-.floating-help:hover .help-tooltip {
-    opacity: 1;
-    visibility: visible;
-    transform: translateY(0);
-}
-
-.help-content h4 {
-    font-size: 1.1rem;
-    font-weight: 600;
-    color: var(--gray-800);
-    margin-bottom: 15px;
-    background: var(--primary-gradient);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    background-clip: text;
-}
-
-.help-content ul {
-    list-style: none;
-}
-
-.help-content li {
-    padding: 8px 0;
-    color: var(--gray-700);
-    font-size: 14px;
-    line-height: 1.5;
-}
-
-.help-content li strong {
-    color: var(--secondary-blue);
-    font-weight: 600;
-}
-
-/* Particles Background */
-.particles {
-    position: fixed;
-    top: 0;
-    left: 0;
-    width: 100%;
-    height: 100%;
-    pointer-events: none;
-    z-index: -1;
-}
-
-.particle {
-    position: absolute;
-    background: var(--secondary-blue);
-    border-radius: 50%;
-    opacity: 0.1;
-    animation: float 6s ease-in-out infinite;
-}
-
-/* Message Content Styling */
-.message-content h1, .message-content h2, .message-content h3 {
-    color: var(--gray-800);
-    margin: 15px 0 10px 0;
-    font-weight: 600;
-}
-
-.message-content h1 { font-size: 1.5rem; }
-.message-content h2 { font-size: 1.3rem; }
-.message-content h3 { font-size: 1.1rem; }
-
-.message-content p {
-    margin: 10px 0;
-    line-height: 1.6;
-}
-
-.message-content ul, .message-content ol {
-    margin: 10px 0;
-    padding-left: 20px;
-}
-
-.message-content li {
-    margin: 5px 0;
-    line-height: 1.5;
-}
-
-.message-content code {
-    background: rgba(59, 130, 246, 0.1);
-    border: 1px solid rgba(59, 130, 246, 0.2);
-    border-radius: 6px;
-    padding: 2px 6px;
-    font-family: 'Courier New', monospace;
-    font-size: 0.9em;
-    color: var(--primary-blue);
-}
-
-.message-content pre {
-    background: var(--gray-100);
-    border: 1px solid var(--gray-200);
-    border-radius: 10px;
-    padding: 15px;
-    overflow-x: auto;
-    margin: 15px 0;
-}
-
-.message-content pre code {
-    background: none;
-    border: none;
-    padding: 0;
-    color: var(--gray-800);
-}
-
-.message-content a {
-    color: var(--secondary-blue);
-    text-decoration: none;
-    font-weight: 500;
-    border-bottom: 1px solid transparent;
-    transition: var(--transition-fast);
-}
-
-.message-content a:hover {
-    border-bottom-color: var(--secondary-blue);
-}
-
-.message-content blockquote {
-    border-left: 4px solid var(--secondary-blue);
-    padding-left: 15px;
-    margin: 15px 0;
-    color: var(--gray-600);
-    font-style: italic;
-    background: rgba(59, 130, 246, 0.05);
-    padding: 15px;
-    border-radius: 0 10px 10px 0;
-}
-
-.message-content table {
-    width: 100%;
-    border-collapse: collapse;
-    margin: 15px 0;
-    background: rgba(255, 255, 255, 0.8);
-    border-radius: 10px;
-    overflow: hidden;
-    box-shadow: var(--shadow-sm);
-}
-
-.message-content th,
-.message-content td {
-    padding: 12px 15px;
-    text-align: left;
-    border-bottom: 1px solid var(--gray-200);
-}
-
-.message-content th {
-    background: var(--secondary-gradient);
-    color: white;
-    font-weight: 600;
-}
-
-.message-content tr:hover {
-    background: rgba(59, 130, 246, 0.05);
-}
-
-/* Responsive Design */
-@media (max-width: 768px) {
-    .main-container {
-        padding: 10px;
-    }
-    
-    .header {
-        padding: 20px;
-        margin-bottom: 20px;
-    }
-    
-    .header-content {
-        flex-direction: column;
-        align-items: flex-start;
-        gap: 15px;
-    }
-    
-    .logo-section {
-        flex-direction: column;
-        align-items: flex-start;
-        gap: 15px;
-    }
-    
-    .title-section h1 {
-        font-size: 1.8rem;
-    }
-    
-    .subtitle {
-        font-size: 1rem;
-    }
-    
-    .source-options {
-        flex-direction: column;
-        gap: 10px;
-    }
-    
-    .chat-header {
-        padding: 15px 20px;
-        flex-direction: column;
-        gap: 15px;
-        align-items: flex-start;
-    }
-    
-    .chat-messages {
-        padding: 15px 20px;
-    }
-    
-    .message-content {
-        max-width: 85%;
-    }
-    
-    .welcome-section {
-        padding: 40px 20px;
-    }
-    
-    .welcome-content h2 {
-        font-size: 1.8rem;
-    }
-    
-    .query-examples {
-        grid-template-columns: 1fr;
-    }
-    
-    .input-container {
-        padding: 20px;
-    }
-    
-    .input-hints {
-        flex-direction: column;
-        gap: 10px;
-        align-items: flex-start;
-    }
-    
-    .floating-help {
-        bottom: 20px;
-        left: 20px;
-        width: 45px;
-        height: 45px;
-    }
-    
-    .help-tooltip {
-        width: 280px;
-    }
-    
-    .status-indicator {
-        top: 10px;
-        right: 10px;
-        font-size: 12px;
-        padding: 6px 12px;
-    }
-}
-
-@media (max-width: 480px) {
-    .header {
-        border-radius: 15px;
-        padding: 15px;
-    }
-    
-    .title-section h1 {
-        font-size: 1.5rem;
-    }
-    
-    .chat-container {
-        border-radius: 15px;
-    }
-    
-    .input-section {
-        border-radius: 15px;
-    }
-    
-    .input-wrapper {
-        padding: 12px 15px;
-        flex-direction: column;
-        gap: 10px;
-    }
-    
-    .input-actions {
-        align-self: flex-end;
-    }
-    
-    .message-content {
-        max-width: 90%;
-    }
-    
-    .help-tooltip {
-        width: 250px;
-    }
-}
-
-/* Animations */
-@keyframes fadeInUp {
-    to {
-        opacity: 1;
-        transform: translateY(0);
-    }
-}
-
-@keyframes typingBounce {
-    0%, 80%, 100% {
-        transform: scale(0);
-    }
-    40% {
-        transform: scale(1);
-    }
-}
-
-@keyframes spin {
-    to {
-        transform: rotate(360deg);
-    }
-}
-
-@keyframes slideInRight {
-    to {
-        transform: translateX(0);
-    }
-}
-
-@keyframes float {
-    0%, 100% {
-        transform: translateY(0px);
-    }
-    50% {
-        transform: translateY(-20px);
-    }
-}
-
-/* Utility Classes */
-.hidden {
-    display: none !important;
-}
-
-.fade-in {
-    animation: fadeInUp 0.5s ease-out forwards;
-}
-
-.blur-background {
-    backdrop-filter: blur(10px);
-}
-
-/* Scrollbar Styling */
-.chat-messages::-webkit-scrollbar {
-    width: 6px;
-}
-
-.chat-messages::-webkit-scrollbar-track {
-    background: var(--gray-100);
-    border-radius: 3px;
-}
-
-.chat-messages::-webkit-scrollbar-thumb {
-    background: var(--gray-300);
-    border-radius: 3px;
-    transition: var(--transition-normal);
-}
-
-.chat-messages::-webkit-scrollbar-thumb:hover {
-    background: var(--gray-400);
-}
-
-/* Focus Styles */
-button:focus-visible,
-input:focus-visible,
-textarea:focus-visible {
-    outline: 2px solid var(--secondary-blue);
-    outline-offset: 2px;
-}
-
-/* Selection Styles */
-::selection {
-    background: rgba(59, 130, 246, 0.2);
-    color: var(--gray-800);
-}
-
-/* Print Styles */
-@media print {
-    .background-pattern,
-    .status-indicator,
-    .floating-help,
-    .loading-overlay,
-    .toast-container,
-    .particles {
-        display: none !important;
-    }
-    
-    .main-container {
-        max-width: none;
-        padding: 0;
-    }
-    
-    .header,
-    .chat-container,
-    .input-section {
-        box-shadow: none;
-        border: 1px solid var(--gray-300);
-    }
-}
-
-/* High Contrast Mode */
-@media (prefers-contrast: high) {
-    :root {
-        --gray-100: #f0f0f0;
-        --gray-200: #e0e0e0;
-        --gray-300: #c0c0c0;
-        --gray-400: #a0a0a0;
-        --gray-500: #808080;
-        --gray-600: #606060;
-        --gray-700: #404040;
-        --gray-800: #202020;
-        --gray-900: #000000;
-    }
-    
-    .message-bubble {
-        border-width: 2px;
-    }
-    
-    .source-option label {
-        border-width: 3px;
-    }
-}
-
-/* Reduced Motion */
-@media (prefers-reduced-motion: reduce) {
-    *,
-    *::before,
-    *::after {
-        animation-duration: 0.01ms !important;
-        animation-iteration-count: 1 !important;
-        transition-duration: 0.01ms !important;
-    }
-    
-    .particles {
-        display: none;
-    }
-}
-
-/* Dark Mode Support (for future enhancement) */
-@media (prefers-color-scheme: dark) {
-    /* Dark mode styles can be added here in the future */
-}
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-// CME Unified Knowledge Assistant - Complete Frontend JavaScript
-class UnifiedAssistant {
-    constructor() {
-        this.apiBase = '/api';
-        this.isTyping = false;
-        this.messageHistory = [];
-        this.particleCount = 0;
-        this.maxParticles = 20;
-        
-        this.init();
-    }
-
-    init() {
-        this.setupEventListeners();
-        this.initializeParticles();
-        this.checkSystemStatus();
-        this.setupSourceTracking();
-        this.initializeAnimations();
-        this.setupAccessibility();
-        
-        console.log('🚀 CME Unified Knowledge Assistant initialized');
-    }
-
-    setupEventListeners() {
-        // Message input handling
-        const messageInput = document.getElementById('messageInput');
-        const sendButton = document.getElementById('sendButton');
-        const clearChat = document.getElementById('clearChat');
-
-        if (messageInput) {
-            messageInput.addEventListener('input', this.handleInputChange.bind(this));
-            messageInput.addEventListener('keydown', this.handleKeyDown.bind(this));
-            messageInput.addEventListener('paste', this.handlePaste.bind(this));
-        }
-
-        if (sendButton) {
-            sendButton.addEventListener('click', this.sendMessage.bind(this));
-        }
-
-        if (clearChat) {
-            clearChat.addEventListener('click', this.clearChatHistory.bind(this));
-        }
-
-        // Source selector handling
-        const sourceCheckboxes = document.querySelectorAll('.source-option input[type="checkbox"]');
-        sourceCheckboxes.forEach(checkbox => {
-            checkbox.addEventListener('change', this.updateSelectedSources.bind(this));
-        });
-
-        // Example query handling
-        const exampleQueries = document.querySelectorAll('.example-query');
-        exampleQueries.forEach(query => {
-            query.addEventListener('click', this.handleExampleQuery.bind(this));
-        });
-
-        // Floating help
-        const floatingHelp = document.getElementById('floatingHelp');
-        if (floatingHelp) {
-            floatingHelp.addEventListener('click', this.toggleHelp.bind(this));
-        }
-
-        // Window events
-        window.addEventListener('resize', this.handleResize.bind(this));
-        window.addEventListener('scroll', this.handleScroll.bind(this));
-        
-        // Parallax effect
-        document.addEventListener('mousemove', this.handleMouseMove.bind(this));
-    }
-
-    handleInputChange(event) {
-        const input = event.target;
-        const charCount = document.getElementById('charCount');
-        const sendButton = document.getElementById('sendButton');
-
-        // Update character count
-        if (charCount) {
-            charCount.textContent = input.value.length;
-        }
-
-        // Auto-resize textarea
-        input.style.height = 'auto';
-        input.style.height = Math.min(input.scrollHeight, 120) + 'px';
-
-        // Enable/disable send button
-        if (sendButton) {
-            sendButton.disabled = !input.value.trim();
-        }
-
-        // Update placeholder based on sources
-        this.updateInputPlaceholder();
-    }
-
-    handleKeyDown(event) {
-        if (event.key === 'Enter' && !event.shiftKey) {
-            event.preventDefault();
-            if (!this.isTyping && event.target.value.trim()) {
-                this.sendMessage();
-            }
-        }
-    }
-
-    handlePaste(event) {
-        // Handle paste events
-        setTimeout(() => {
-            this.handleInputChange(event);
-        }, 0);
-    }
-
-    async sendMessage() {
-        console.log('🚀 Send message triggered');
-        
-        const messageInput = document.getElementById('messageInput');
-        const message = messageInput.value.trim();
-
-        if (!message || this.isTyping) {
-            console.log('❌ Message empty or currently typing, aborting');
-            return;
-        }
-
-        // Get selected sources
-        const selectedSources = this.getSelectedSources();
-        console.log('📊 Selected sources:', selectedSources);
-        
-        if (selectedSources.length === 0) {
-            this.showToast('Please select at least one data source', 'warning');
-            return;
-        }
-
-        console.log('📝 Sending message:', message);
-
-        // Clear input and hide welcome
-        messageInput.value = '';
-        this.handleInputChange({ target: messageInput });
-        this.hideWelcomeSection();
-
-        // Add user message immediately
-        this.addMessage(message, 'user');
-        
-        // Show typing indicator
-        this.showTypingIndicator();
-
-        try {
-            console.log('🌐 Making API request...');
-            
-            // Send to backend
-            const response = await fetch(`${this.apiBase}/chat`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    message: message,
-                    sources: selectedSources
-                })
-            });
-
-            console.log('📡 API response status:', response.status);
-            
-            if (!response.ok) {
-                const errorText = await response.text();
-                console.error('❌ API error response:', errorText);
-                throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-            }
-
-            const data = await response.json();
-            console.log('✅ API response received:', data);
-            
-            // Hide typing indicator
-            this.hideTypingIndicator();
-
-            // Add assistant response
-            if (data.response) {
-                this.addMessage(data.response, 'assistant');
-                console.log('🤖 Assistant message added successfully');
-            } else {
-                console.error('❌ No response in API data:', data);
-                this.addMessage('I received an empty response. Please try again.', 'assistant');
-            }
-            
-            // Store in history
-            this.messageHistory.push({
-                user: message,
-                assistant: data.response || 'Empty response',
-                sources: selectedSources,
-                timestamp: new Date().toISOString()
-            });
-
-        } catch (error) {
-            console.error('❌ Error sending message:', error);
-            this.hideTypingIndicator();
-            
-            const errorMessage = `I apologize, but I'm having trouble connecting to the knowledge systems right now. Please try again in a moment.\n\n**Error Details:** ${error.message}`;
-            this.addMessage(errorMessage, 'assistant');
-            this.showToast('Connection error - please try again', 'error');
-        }
-    }
-
-    addMessage(content, sender) {
-        console.log(`📨 Adding ${sender} message:`, content.substring(0, 100) + '...');
-        
-        const chatMessages = document.getElementById('chatMessages');
-        if (!chatMessages) {
-            console.error('❌ Chat messages container not found');
-            return;
-        }
-
-        // Create message container
-        const messageDiv = document.createElement('div');
-        messageDiv.className = `message ${sender}`;
-
-        // Create avatar
-        const avatar = document.createElement('div');
-        avatar.className = 'message-avatar';
-        avatar.textContent = sender === 'user' ? 'U' : '🤖';
-
-        // Create message content container
-        const messageContent = document.createElement('div');
-        messageContent.className = 'message-content';
-
-        // Create message bubble
-        const messageBubble = document.createElement('div');
-        messageBubble.className = 'message-bubble';
-        
-        // Format and set message content
-        messageBubble.innerHTML = this.formatMessage(content);
-
-        // Create timestamp
-        const messageTime = document.createElement('div');
-        messageTime.className = 'message-time';
-        messageTime.textContent = new Date().toLocaleTimeString();
-
-        // Assemble the message
-        messageContent.appendChild(messageBubble);
-        messageContent.appendChild(messageTime);
-
-        messageDiv.appendChild(avatar);
-        messageDiv.appendChild(messageContent);
-
-        // Add to chat with animation
-        chatMessages.appendChild(messageDiv);
-
-        // Animate in
-        requestAnimationFrame(() => {
-            messageDiv.style.opacity = '1';
-            messageDiv.style.transform = 'translateY(0)';
-        });
-
-        // Scroll to bottom
-        this.scrollToBottom();
-        
-        console.log(`✅ ${sender} message added successfully`);
-    }
-
-    formatMessage(content) {
-        if (!content) return '';
-        
-        let formatted = content
-            // Headers with proper hierarchy
-            .replace(/^### (.*$)/gm, '<h3>$1</h3>')
-            .replace(/^## (.*$)/gm, '<h2>$1</h2>')
-            .replace(/^# (.*$)/gm, '<h1>$1</h1>')
-            // Bold text
-            .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
-            // Italic text
-            .replace(/\*(.*?)\*/g, '<em>$1</em>')
-            // Code blocks
-            .replace(/```(\w+)?\n?([\s\S]*?)```/g, (match, lang, code) => {
-                const language = lang ? ` data-language="${lang}"` : '';
-                return `<pre><code${language}>${this.escapeHtml(code.trim())}</code></pre>`;
-            })
-            // Inline code
-            .replace(/`([^`]+)`/g, '<code>$1</code>')
-            // Links with proper accessibility
-            .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer" title="$1 (opens in new tab)">$1 <i class="fas fa-external-link-alt" style="font-size: 0.8em; margin-left: 4px;"></i></a>')
-            // Line breaks
-            .replace(/\n\n/g, '</p><p>')
-            .replace(/\n/g, '<br>');
-
-        // Handle lists
-        formatted = this.formatLists(formatted);
-        
-        // Wrap in paragraphs if needed
-        if (!formatted.startsWith('<h') && !formatted.startsWith('<p') && !formatted.startsWith('<ul') && !formatted.startsWith('<ol')) {
-            formatted = '<p>' + formatted + '</p>';
-        }
-
-        return formatted;
-    }
-
-    formatLists(content) {
-        // Unordered lists
-        let lines = content.split('\n');
-        let inList = false;
-        let result = [];
-        
-        for (let line of lines) {
-            if (line.match(/^[•\-\*]\s+/)) {
-                if (!inList) {
-                    result.push('<ul>');
-                    inList = true;
-                }
-                result.push('<li>' + line.replace(/^[•\-\*]\s+/, '') + '</li>');
-            } else if (line.match(/^\d+\.\s+/)) {
-                if (!inList) {
-                    result.push('<ol>');
-                    inList = true;
-                }
-                result.push('<li>' + line.replace(/^\d+\.\s+/, '') + '</li>');
-            } else {
-                if (inList) {
-                    result.push('</ul>');
-                    inList = false;
-                }
-                result.push(line);
-            }
-        }
-        
-        if (inList) {
-            result.push('</ul>');
-        }
-        
-        return result.join('\n');
-    }
-
-    escapeHtml(text) {
-        const div = document.createElement('div');
-        div.textContent = text;
-        return div.innerHTML;
-    }
-
-    showTypingIndicator() {
-        this.isTyping = true;
-        const indicator = document.getElementById('typingIndicator');
-        if (indicator) {
-            indicator.classList.add('show');
-        }
-        this.scrollToBottom();
-        console.log('⏳ Typing indicator shown');
-    }
-
-    hideTypingIndicator() {
-        this.isTyping = false;
-        const indicator = document.getElementById('typingIndicator');
-        if (indicator) {
-            indicator.classList.remove('show');
-        }
-        console.log('✅ Typing indicator hidden');
-    }
-
-    scrollToBottom() {
-        const chatMessages = document.getElementById('chatMessages');
-        if (chatMessages) {
-            setTimeout(() => {
-                chatMessages.scrollTop = chatMessages.scrollHeight;
-            }, 100);
-        }
-    }
-
-    hideWelcomeSection() {
-        const welcomeSection = document.getElementById('welcomeSection');
-        if (welcomeSection) {
-            welcomeSection.style.display = 'none';
-        }
-    }
-
-    clearChatHistory() {
-        const chatMessages = document.getElementById('chatMessages');
-        const welcomeSection = document.getElementById('welcomeSection');
-        
-        if (chatMessages) {
-            chatMessages.innerHTML = '';
-        }
-        
-        if (welcomeSection) {
-            welcomeSection.style.display = 'block';
-        }
-        
-        this.messageHistory = [];
-        this.showToast('Chat history cleared', 'success');
-        console.log('🧹 Chat history cleared');
-    }
-
-    getSelectedSources() {
-        const sources = [];
-        const confluenceCheck = document.getElementById('confluence');
-        const jiraCheck = document.getElementById('jira');
-
-        if (confluenceCheck && confluenceCheck.checked) {
-            sources.push('confluence');
-        }
-        if (jiraCheck && jiraCheck.checked) {
-            sources.push('jira');
-        }
-
-        // If both are selected, add 'both' for backend processing
-        if (sources.length === 2) {
-            sources.push('both');
-        }
-
-        return sources;
-    }
-
-    updateSelectedSources() {
-        const sourcesList = document.getElementById('sourcesList');
-        if (!sourcesList) return;
-
-        const sources = this.getSelectedSources();
-        let displayText = '';
-
-        if (sources.includes('confluence') && sources.includes('jira')) {
-            displayText = 'Confluence + Jira';
-        } else if (sources.includes('confluence')) {
-            displayText = 'Confluence Only';
-        } else if (sources.includes('jira')) {
-            displayText = 'Jira Only';
-        } else {
-            displayText = 'No Sources Selected';
-        }
-
-        sourcesList.textContent = displayText;
-        this.updateInputPlaceholder();
-    }
-
-    updateInputPlaceholder() {
-        const messageInput = document.getElementById('messageInput');
-        if (!messageInput) return;
-
-        const sources = this.getSelectedSources();
-        let placeholder = '';
-
-        if (sources.includes('confluence') && sources.includes('jira')) {
-            placeholder = 'Ask me anything about CME\'s documentation and tickets...';
-        } else if (sources.includes('confluence')) {
-            placeholder = 'Ask me about CME\'s documentation and procedures...';
-        } else if (sources.includes('jira')) {
-            placeholder = 'Ask me about tickets, issues, and project tracking...';
-        } else {
-            placeholder = 'Please select at least one data source first...';
-        }
-
-        messageInput.placeholder = placeholder;
-    }
-
-    handleExampleQuery(event) {
-        const query = event.currentTarget.getAttribute('data-query');
-        if (query) {
-            const messageInput = document.getElementById('messageInput');
-            if (messageInput) {
-                messageInput.value = query;
-                this.handleInputChange({ target: messageInput });
-                messageInput.focus();
-            }
-        }
-    }
-
-    async checkSystemStatus() {
-        const statusIndicator = document.getElementById('statusIndicator');
-        const statusText = statusIndicator?.querySelector('.status-text');
-
-        try {
-            console.log('🔍 Checking system status...');
-            const response = await fetch(`${this.apiBase}/status`);
-            const data = await response.json();
-
-            let status = 'error';
-            let text = 'System Error';
-
-            if (response.ok) {
-                if (data.confluence && data.jira) {
-                    status = 'connected';
-                    text = `Connected (${data.confluence_pages} pages loaded)`;
-                } else if (data.confluence || data.jira) {
-                    status = 'degraded';
-                    text = 'Partially Connected';
-                } else {
-                    status = 'error';
-                    text = 'Connection Failed';
-                }
-            }
-
-            if (statusIndicator) {
-                statusIndicator.className = `status-indicator ${status}`;
-            }
-            if (statusText) {
-                statusText.textContent = text;
-            }
-
-            console.log(`📊 System status: ${status} - ${text}`);
-
-        } catch (error) {
-            console.error('❌ Status check failed:', error);
-            if (statusIndicator) {
-                statusIndicator.className = 'status-indicator error';
-            }
-            if (statusText) {
-                statusText.textContent = 'Connection Error';
-            }
-        }
-
-        // Check status every 30 seconds
-        setTimeout(() => this.checkSystemStatus(), 30000);
-    }
-
-    initializeParticles() {
-        const particlesContainer = document.getElementById('particles');
-        if (!particlesContainer) return;
-
-        // Create initial particles
-        for (let i = 0; i < this.maxParticles; i++) {
-            setTimeout(() => this.createParticle(), i * 200);
-        }
-
-        // Continue creating particles
-        setInterval(() => {
-            if (this.particleCount < this.maxParticles) {
-                this.createParticle();
-            }
-        }, 1000);
-    }
-
-    createParticle() {
-        const particlesContainer = document.getElementById('particles');
-        if (!particlesContainer) return;
-
-        const particle = document.createElement('div');
-        const type = Math.floor(Math.random() * 3) + 1;
-        
-        particle.className = `particle particle-${type}`;
-        particle.style.left = Math.random() * 100 + '%';
-        particle.style.animationDuration = (8 + Math.random() * 8) + 's';
-        particle.style.animationDelay = Math.random() * 2 + 's';
-
-        particlesContainer.appendChild(particle);
-        this.particleCount++;
-
-        // Remove particle after animation
-        setTimeout(() => {
-            if (particle.parentNode) {
-                particle.parentNode.removeChild(particle);
-                this.particleCount--;
-            }
-        }, 16000);
-    }
-
-    initializeAnimations() {
-        // Add stagger animation to example queries
-        const exampleQueries = document.querySelectorAll('.example-query');
-        exampleQueries.forEach((query, index) => {
-            query.classList.add('stagger-item');
-            query.style.animationDelay = `${0.1 + index * 0.1}s`;
-        });
-
-        // Add morphing shapes
-        this.createMorphingShapes();
-        
-        // Setup intersection observer for scroll animations
-        this.setupScrollAnimations();
-    }
-
-    createMorphingShapes() {
-        const backgroundPattern = document.querySelector('.background-pattern');
-        if (!backgroundPattern) return;
-
-        const shapesContainer = document.createElement('div');
-        shapesContainer.className = 'morphing-shapes';
-
-        // Create 3 morphing shapes
-        for (let i = 1; i <= 3; i++) {
-            const shape = document.createElement('div');
-            shape.className = 'morphing-shape';
-            shapesContainer.appendChild(shape);
-        }
-
-        backgroundPattern.appendChild(shapesContainer);
-    }
-
-    setupScrollAnimations() {
-        const observerOptions = {
-            threshold: 0.1,
-            rootMargin: '0px 0px -50px 0px'
-        };
-
-        const observer = new IntersectionObserver((entries) => {
-            entries.forEach(entry => {
-                if (entry.isIntersecting) {
-                    entry.target.classList.add('visible');
-                }
-            });
-        }, observerOptions);
-
-        // Observe elements for scroll animations
-        document.querySelectorAll('.fade-in-viewport').forEach(el => {
-            observer.observe(el);
-        });
-    }
-
-    handleMouseMove(event) {
-        // Parallax effect for floating elements
-        const floatingElements = document.querySelectorAll('.floating-element');
-        const { clientX, clientY } = event;
-        const { innerWidth, innerHeight } = window;
-
-        const xPercent = (clientX / innerWidth) * 100;
-        const yPercent = (clientY / innerHeight) * 100;
-
-        floatingElements.forEach((element, index) => {
-            const speed = 0.05 + (index * 0.02);
-            const x = (xPercent - 50) * speed;
-            const y = (yPercent - 50) * speed;
-            
-            element.style.transform = `translate(${x}px, ${y}px)`;
-        });
-    }
-
-    handleResize() {
-        // Adjust particle count based on screen size
-        const width = window.innerWidth;
-        
-        if (width < 768) {
-            this.maxParticles = 10;
-        } else if (width < 1024) {
-            this.maxParticles = 15;
-        } else {
-            this.maxParticles = 20;
-        }
-
-        // Update input placeholder
-        this.updateInputPlaceholder();
-    }
-
-    handleScroll() {
-        // Parallax scrolling effect
-        const scrolled = window.pageYOffset;
-        const parallaxElements = document.querySelectorAll('.parallax-element');
-        
-        parallaxElements.forEach((element, index) => {
-            const speed = 0.1 + (index * 0.05);
-            const yPos = -(scrolled * speed);
-            element.style.transform = `translateY(${yPos}px)`;
-        });
-    }
-
-    showToast(message, type = 'info', duration = 4000) {
-        const toastContainer = document.getElementById('toastContainer');
-        if (!toastContainer) return;
-
-        const toast = document.createElement('div');
-        toast.className = `toast ${type}`;
-        
-        const icon = this.getToastIcon(type);
-        toast.innerHTML = `
-            <div style="display: flex; align-items: center; gap: 10px;">
-                <i class="${icon}"></i>
-                <span>${message}</span>
-            </div>
-        `;
-
-        toastContainer.appendChild(toast);
-
-        // Auto remove
-        setTimeout(() => {
-            toast.style.animation = 'slideOutRight 0.3s ease-in forwards';
-            setTimeout(() => {
-                if (toast.parentNode) {
-                    toast.parentNode.removeChild(toast);
-                }
-            }, 300);
-        }, duration);
-
-        // Manual close on click
-        toast.addEventListener('click', () => {
-            toast.style.animation = 'slideOutRight 0.3s ease-in forwards';
-            setTimeout(() => {
-                if (toast.parentNode) {
-                    toast.parentNode.removeChild(toast);
-                }
-            }, 300);
-        });
-    }
-
-    getToastIcon(type) {
-        switch (type) {
-            case 'success': return 'fas fa-check-circle';
-            case 'error': return 'fas fa-exclamation-circle';
-            case 'warning': return 'fas fa-exclamation-triangle';
-            default: return 'fas fa-info-circle';
-        }
-    }
-
-    toggleHelp() {
-        const tooltip = document.querySelector('.help-tooltip');
-        if (tooltip) {
-            const isVisible = tooltip.style.opacity === '1';
-            tooltip.style.opacity = isVisible ? '0' : '1';
-            tooltip.style.visibility = isVisible ? 'hidden' : 'visible';
-            tooltip.style.transform = isVisible ? 'translateY(10px)' : 'translateY(0)';
-        }
-    }
-
-    setupSourceTracking() {
-        // Track source changes for analytics
-        const sourceCheckboxes = document.querySelectorAll('.source-option input[type="checkbox"]');
-        sourceCheckboxes.forEach(checkbox => {
-            checkbox.addEventListener('change', () => {
-                const sources = this.getSelectedSources();
-                console.log('📊 Sources updated:', sources);
-                
-                // Update UI feedback
-                this.updateSourceFeedback(sources);
-            });
-        });
-
-        // Initialize with default state
-        this.updateSelectedSources();
-    }
-
-    updateSourceFeedback(sources) {
-        // Visual feedback for source selection
-        const sourceOptions = document.querySelectorAll('.source-option');
-        
-        sourceOptions.forEach(option => {
-            const checkbox = option.querySelector('input[type="checkbox"]');
-            const label = option.querySelector('label');
-            
-            if (checkbox && label) {
-                if (checkbox.checked) {
-                    label.classList.add('interactive-element');
-                    option.classList.add('breathing');
-                } else {
-                    label.classList.remove('interactive-element');
-                    option.classList.remove('breathing');
-                }
-            }
-        });
-
-        // Show warning if no sources selected
-        if (sources.length === 0) {
-            this.showToast('Please select at least one data source', 'warning', 3000);
-        }
-    }
-
-    setupAccessibility() {
-        // Enhanced keyboard navigation
-        const focusableElements = document.querySelectorAll(
-            'button, input, textarea, [tabindex]:not([tabindex="-1"])'
-        );
-
-        focusableElements.forEach(element => {
-            element.classList.add('focus-ring');
-            
-            // Add ripple effect to buttons
-            if (element.tagName === 'BUTTON') {
-                element.classList.add('ripple');
-            }
-        });
-
-        // Screen reader announcements
-        this.setupScreenReaderSupport();
-        
-        // High contrast mode detection
-        this.detectHighContrast();
-    }
-
-    setupScreenReaderSupport() {
-        // Create announcer for screen readers
-        const announcer = document.createElement('div');
-        announcer.setAttribute('aria-live', 'polite');
-        announcer.setAttribute('aria-atomic', 'true');
-        announcer.className = 'sr-only';
-        announcer.style.cssText = `
-            position: absolute !important;
-            width: 1px !important;
-            height: 1px !important;
-            padding: 0 !important;
-            margin: -1px !important;
-            overflow: hidden !important;
-            clip: rect(0, 0, 0, 0) !important;
-            white-space: nowrap !important;
-            border: 0 !important;
-        `;
-        document.body.appendChild(announcer);
-
-        this.announcer = announcer;
-    }
-
-    detectHighContrast() {
-        // Detect high contrast mode
-        if (window.matchMedia('(prefers-contrast: high)').matches) {
-            document.body.classList.add('high-contrast-mode');
-            console.log('🎨 High contrast mode detected');
-        }
-
-        // Listen for changes
-        window.matchMedia('(prefers-contrast: high)').addEventListener('change', (e) => {
-            if (e.matches) {
-                document.body.classList.add('high-contrast-mode');
-            } else {
-                document.body.classList.remove('high-contrast-mode');
-            }
-        });
-    }
-
-    // Performance monitoring
-    measurePerformance(name, fn) {
-        const start = performance.now();
-        const result = fn();
-        const end = performance.now();
-        console.log(`⚡ ${name} took ${(end - start).toFixed(2)} milliseconds`);
-        return result;
-    }
-
-    // Error handling and recovery
-    handleError(error, context = '') {
-        console.error(`❌ Error in ${context}:`, error);
-        
-        // Log to analytics if available
-        if (window.gtag) {
-            window.gtag('event', 'exception', {
-                description: `${context}: ${error.message}`,
-                fatal: false
-            });
-        }
-
-        // Show user-friendly error
-        this.showToast(
-            'Something went wrong. Please try again or refresh the page.',
-            'error',
-            5000
-        );
-    }
-
-    // Cleanup and destroy
-    destroy() {
-        // Remove event listeners
-        window.removeEventListener('resize', this.handleResize);
-        window.removeEventListener('scroll', this.handleScroll);
-        document.removeEventListener('mousemove', this.handleMouseMove);
-
-        // Clear particles
-        const particlesContainer = document.getElementById('particles');
-        if (particlesContainer) {
-            particlesContainer.innerHTML = '';
-        }
-
-        // Clear any running intervals/timeouts
-        this.particleCount = 0;
-
-        console.log('🧹 UnifiedAssistant cleaned up');
-    }
-}
-
-// Enhanced slideOutRight animation keyframes
-const slideOutRightKeyframes = `
-@keyframes slideOutRight {
-    from {
-        transform: translateX(0);
-        opacity: 1;
-    }
-    to {
-        transform: translateX(400px);
-        opacity: 0;
-    }
-}
-`;
-
-// Add the keyframes to the document
-const style = document.createElement('style');
-style.textContent = slideOutRightKeyframes;
-document.head.appendChild(style);
-
-// Initialize the application when DOM is ready
-document.addEventListener('DOMContentLoaded', () => {
-    console.log('🎯 DOM Content Loaded');
-    
-    // Check for modern browser features
-    if (!window.fetch || !window.Promise) {
-        alert('This application requires a modern browser. Please update your browser to continue.');
-        return;
-    }
-
-    // Initialize the assistant
-    console.log('🚀 Initializing CME Unified Knowledge Assistant...');
-    window.assistant = new UnifiedAssistant();
-
-    // Service worker registration for offline support (optional)
-    if ('serviceWorker' in navigator) {
-        navigator.serviceWorker.register('/sw.js').catch(err => {
-            console.log('🔧 Service worker registration failed:', err);
-        });
-    }
-
-    // Add loading class to body initially
-    document.body.classList.add('loading');
-    
-    // Remove loading class after initialization
-    setTimeout(() => {
-        document.body.classList.remove('loading');
-        document.body.classList.add('loaded');
-        console.log('✅ Application fully loaded and ready');
-    }, 1000);
-
-    // Global error handler
-    window.addEventListener('error', (event) => {
-        if (window.assistant) {
-            window.assistant.handleError(event.error, 'Global Error');
-        }
-    });
-
-    // Unhandled promise rejection handler
-    window.addEventListener('unhandledrejection', (event) => {
-        if (window.assistant) {
-            window.assistant.handleError(event.reason, 'Unhandled Promise Rejection');
-        }
-    });
-
-    console.log('🎉 CME Unified Knowledge Assistant ready!');
-});
-
-// Expose assistant to global scope for debugging
-window.CMEAssistant = UnifiedAssistant;
