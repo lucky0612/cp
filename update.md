@@ -1,17 +1,19 @@
 apiVersion: monitoring.cnrm.cloud.google.com/v1beta1
 kind: MonitoringAlertPolicy
 metadata:
-  name: alert-coml-5913-no-response-usc1 # A unique name for this alert policy
+  name: alert-coml-5913-no-response-usc1
   labels:
     component_id: coml-5913
-    contact_name: sre # As per your existing labels
-    project_id: prj-dv-sphere-0721 # As per your existing labels
+    contact_name: sre
+    project_id: prj-dv-sphere-0721
 spec:
-  displayName: "No Response Alert: >5% Request Timeout Rate (coml-5913 /rest/* usc1)"
+  projectRef:
+    external: "prj-dv-sphere-0721"
+  displayName: "No Response Alert: Response Rate Drop (coml-5913 /rest/* usc1)"
   enabled: true
-  combiner: OR # Standard for a single condition
+  combiner: OR
   conditions:
-    - displayName: "Current timeout rate > 5% for 5 continuous minutes"
+    - displayName: "Response rate dropped significantly for 5 minutes"
       conditionMonitoringQueryLanguage:
         query: |
           fetch k8s_container
@@ -23,93 +25,45 @@ spec:
               metric.http_route =~ "/rest/.*" &&
               resource.location == 'us-central1'
           )
-          # Count total requests across all matching time series
-          | group_by [], [value_request_count_aggregate: sum(val())] # Total requests
+          | filter metric.http_response_status_code != ''
+          | group_by [], [value_request_count_aggregate: sum(val())]
           | {
-              # Calculate request rate over the last 5 minutes
               align rate(5m)
-              | value [total_request_rate_5m: val()]
+              | value [current_rate_5m: val()]
+              align rate(1h) 
+              | value [avg_rate_1h: val()]
           }
-          # Get completed requests (those that got a response)
-          | union (
-              fetch k8s_container
-              | metric 'workload.googleapis.com/http.server.request.duration'
-              | filter (
-                  metric.app_id == '2852' &&
-                  metric.component_id == 'coml-5913' &&
-                  metric.namespace == 'app-2852-default' &&
-                  metric.http_route =~ "/rest/.*" &&
-                  resource.location == 'us-central1'
-              )
-              | group_by [], [value_completed_count_aggregate: sum(val())] # Completed requests
-              | {
-                  # Calculate completed request rate over the last 5 minutes
-                  align rate(5m)
-                  | value [completed_request_rate_5m: val()]
-              }
-          )
-          # Join the total and completed request streams
           | join
-          # Calculate the timeout rate percentage
-          | value timeout_rate_percent = (1 - (completed_request_rate_5m / total_request_rate_5m)) * 100
-          # The condition: alert if timeout rate is greater than 5%
-          | condition timeout_rate_percent > 5.0
-
-        duration: "300s" # The condition (timeout rate > 5%) must be true continuously for 5 minutes
+          | filter avg_rate_1h > cast_units(0.001, "1/s")
+          | value current_rate_5m / avg_rate_1h
+          | condition val() < 0.90
+        duration: "300s"
         trigger:
-          count: 1 # The MQL query results in a single boolean time series for the alert
+          count: 1
 
   alertStrategy:
     notificationRateLimit:
-      period: "300s" # Limit notifications to one every 5 minutes for this alert
-    autoClose: "1800s" # Automatically close incidents after 30 minutes if the condition clears
+      period: "300s"
+    autoClose: "1800s"
 
   notificationChannels:
-    # These should be the fully qualified names or the KRM resource names of your notification channels.
-    # Based on your values.yaml and compiled notification channels, these are:
-    - name: sphere-notification-channel # KRM resource name
-    - name: refsre-notification-channel # KRM resource name
-    # If using fully qualified names, they would look like:
-    # - "projects/prj-dv-sphere-0721/notificationChannels/YOUR_CHANNEL_ID_1"
-    # - "projects/prj-dv-sphere-0721/notificationChannels/YOUR_CHANNEL_ID_2"
+    - external: "projects/prj-dv-sphere-0721/notificationChannels/sphere-notification-channel"
+    - external: "projects/prj-dv-sphere-0721/notificationChannels/refsre-notification-channel"
 
   documentation:
     content: |
       ## No Response Alert Detected!
-
+      
       **Service:** coml-5913
       **Location:** us-central1
-      **Affected Routes:** /rest/*
-      **App ID:** 2852
-      **Namespace:** app-2852-default
-
-      **Alert:** More than 5% of requests are timing out without receiving ANY response and this condition has been sustained for **5 minutes**.
-
-      **Policy Name:** $(policy.display_name)
-      **Condition Name:** $(condition.display_name)
-
-      **MQL Condition Met:** 'Timeout rate percentage > 5.0%'
-
-      ---
-
-      ### Potential Causes:
-      * Complete service outages or pod crashes
-      * Load balancer timeouts or misconfigurations  
-      * Network connectivity issues or DNS problems
-      * Resource exhaustion (CPU/Memory limits exceeded)
-      * Backend database connection pool exhaustion
-      * Upstream service dependencies completely failing
-
-      ---
-
-      ### Recommended Actions:
-      1. **Verify service health:** Check pod status and recent restarts for coml-5913 (You might want to create a pre-configured link for the specific MQL).
-      2. **Check infrastructure:** Examine load balancer health and network connectivity in Google Cloud Console.
-      3. **Review recent changes:** Check deployment history, configuration changes, and infrastructure updates.
-      4. **Assess resource usage:** Monitor CPU, memory, and connection pool utilization.
-      5. **Check dependencies:** Verify upstream services and database availability.
-
-      ---
-
-      *This alert was triggered by the policy: '$(policy.name)' *
+      **Routes:** /rest/*
+      
+      Response rate has dropped below 90% of baseline for 5+ minutes.
+      This indicates requests may be timing out without responses.
+      
+      **Actions:**
+      1. Check pod status: kubectl get pods -l component=coml-5913 -n app-2852-default
+      2. Check logs: kubectl logs -l component=coml-5913 -n app-2852-default --tail=50
+      3. Verify load balancer health
+      4. Check resource utilization
     mimeType: "text/markdown"
