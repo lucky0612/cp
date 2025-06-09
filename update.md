@@ -67,3 +67,41 @@ spec:
       3. Verify load balancer health
       4. Check resource utilization
     mimeType: "text/markdown"
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ - name: "sphere-no-response-slo-burn"
+    displayName: "No Response: Request timeout alert"
+
+
+
+
+
+
+
+
+
+
+
+   - krmName: sphere-no-response-usc1
+        displayName: "No Response: 99.5% requests receive response"
+        mode: STATS
+        goal: 0.995
+        errorBudgetThreshold: 0.80
+        rollingPeriod: "604800s"
+        serviceLevelIndicator:
+          requestBased:
+            goodTotalRatio:
+              goodServiceFilter: "metric.type=\"workload.googleapis.com/http.server.request.count\" resource.type=\"k8s_container\" metric.labels.app_id=\"2852\" metric.labels.component_id=\"coml-5913\" metric.labels.namespace=\"app-2852-default\" metric.labels.http_response_status_code=~\"[2-5][0-9][0-9]\" resource.labels.location=\"us-central1\""
+              totalServiceFilter: "metric.type=\"workload.googleapis.com/http.server.request.count\" resource.type=\"k8s_container\" metric.labels.app_id=\"2852\" metric.labels.component_id=\"coml-5913\" metric.labels.namespace=\"app-2852-default\" resource.labels.location=\"us-central1\""
