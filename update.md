@@ -12,356 +12,347 @@
 <body>
     <!-- Header -->
     <header class="header">
-        <div class="header-content">
-            <div class="logo">
-                <i class="fas fa-exchange-alt"></i>
-                <h1>OSCAR Reconcile</h1>
-            </div>
-            <div class="connection-status">
-                <span class="status-dot" id="connection-status"></span>
-                <span id="connection-text">Connected</span>
+        <div class="container">
+            <div class="header-content">
+                <div class="logo">
+                    <i class="fas fa-exchange-alt"></i>
+                    <h1>OSCAR Reconciliation Tool</h1>
+                </div>
+                <div class="connection-status">
+                    <span class="status-dot connected" id="connection-status"></span>
+                    <span id="connection-text">Connected</span>
+                </div>
             </div>
         </div>
     </header>
 
     <!-- Main Content -->
-    <main class="container">
-        <!-- Welcome Section -->
-        <section class="welcome-section">
-            <div class="welcome-content">
-                <h2>Data Reconciliation Between OSCAR, CoPPER, STAR & EDB</h2>
-                <p>Compare and synchronize financial trading data across multiple systems</p>
-            </div>
-        </section>
-
-        <!-- Form Section -->
-        <section class="form-section">
-            <div class="form-card">
-                <div class="form-header">
-                    <h3><i class="fas fa-search"></i> Reconciliation Parameters</h3>
-                    <p>Configure your reconciliation criteria and comparison settings</p>
+    <main class="main-content">
+        <div class="container">
+            <!-- Welcome Section -->
+            <section class="welcome-section fade-in">
+                <div class="welcome-content">
+                    <h2>Data Reconciliation Between OSCAR, CoPPER, STAR & EDB</h2>
+                    <p>Compare and synchronize financial trading data across multiple systems</p>
                 </div>
+            </section>
 
-                <form id="reconcile-form">
-                    <div class="form-grid">
-                        <div class="form-group">
-                            <label for="reconcile-date">Reconciliation Date</label>
-                            <input type="date" id="reconcile-date" name="reconcile-date" required>
-                            <span class="input-info">Select the date for data comparison</span>
-                        </div>
-
-                        <div class="form-group">
-                            <label for="guid">GUID (12 chars)</label>
-                            <input type="text" id="guid" name="guid" placeholder="e.g., ABCDEFGH1234">
-                            <span class="input-info">Global Unique Identifier</span>
-                        </div>
-
-                        <div class="form-group">
-                            <label for="gfid">GFID (4 chars)</label>
-                            <input type="text" id="gfid" name="gfid" placeholder="e.g., ABCD">
-                            <span class="input-info">Globex Firm ID</span>
-                        </div>
-
-                        <div class="form-group">
-                            <label for="gus-id">GUS ID (5 chars)</label>
-                            <input type="text" id="gus-id" name="gus_id" placeholder="e.g., ABCDE">
-                            <span class="input-info">Globex User Signature ID</span>
-                        </div>
-
-                        <div class="form-group">
-                            <label for="contact-id">Contact ID</label>
-                            <input type="text" id="contact-id" name="contact_id" placeholder="Contact Identifier">
-                            <span class="input-info">Associated Contact Identifier</span>
-                        </div>
-
-                        <div class="form-group">
-                            <label for="session-id">Session ID</label>
-                            <input type="text" id="session-id" name="session_id" placeholder="e.g., MDBLZ, FIF">
-                            <span class="input-info">Trading Session Identifier</span>
-                        </div>
+            <!-- Search Section -->
+            <section class="search-section slide-up">
+                <div class="search-card">
+                    <div class="search-header">
+                        <h3><i class="fas fa-search"></i> Reconciliation Parameters</h3>
+                        <p>Configure your reconciliation criteria and comparison settings</p>
                     </div>
 
-                    <div class="comparison-scenarios">
-                        <h4>Comparison Scenarios</h4>
-                        <div class="scenario-grid">
+                    <form id="reconcile-form">
+                        <div class="form-grid">
                             <div class="form-group">
-                                <label for="comparison-type">Primary Comparison</label>
-                                <select id="comparison-type" name="comparison_type">
-                                    <option value="guid_lookup">Standard GUID Lookup</option>
-                                    <option value="scenario_2_1">Scenario 2.1 - Both Expired</option>
-                                    <option value="scenario_2_2">Scenario 2.2 - OSCAR Expired, COPPER Active</option>
-                                    <option value="scenario_2_3">Scenario 2.3 - OSCAR Expired, COPPER Missing</option>
-                                    <option value="scenario_2_4">Scenario 2.4 - OSCAR Active, COPPER Missing</option>
-                                </select>
+                                <label for="reconcile-date"><i class="fas fa-calendar"></i> Reconciliation Date</label>
+                                <input type="date" id="reconcile-date" name="reconcile-date" required>
+                                <div class="input-info">Select the date for data comparison</div>
                             </div>
                             <div class="form-group">
-                                <label for="comparison-field">Compare By</label>
-                                <select id="comparison-field" name="comparison_field">
-                                    <option value="session_id">Session ID</option>
-                                    <option value="gus_id">GUS ID</option>
-                                    <option value="gfid">GFID</option>
-                                    <option value="contact_id">Contact ID</option>
-                                    <option value="product_id">Product ID</option>
-                                    <option value="status">Status</option>
-                                </select>
+                                <label for="guid"><i class="fas fa-key"></i> GUID</label>
+                                <input type="text" id="guid" name="guid" placeholder="e.g., ABCDEFGH1234">
+                                <div class="input-info">Global Unique Identifier (any length)</div>
                             </div>
                             <div class="form-group">
-                                <label for="table-set">Table Set</label>
-                                <select id="table-set" name="table_set">
-                                    <option value="both_star_edb">Both STAR & EDB</option>
-                                    <option value="star_only">STAR Only</option>
-                                    <option value="edb_only">EDB Only</option>
-                                </select>
+                                <label for="gfid"><i class="fas fa-building"></i> GFID</label>
+                                <input type="text" id="gfid" name="gfid" placeholder="e.g., BTEC">
+                                <div class="input-info">Globex Firm ID (any length)</div>
                             </div>
                             <div class="form-group">
-                                <label for="sync-direction">Sync Direction</label>
-                                <select id="sync-direction" name="sync_direction">
-                                    <option value="bidirectional">Bidirectional</option>
-                                    <option value="oscar_to_systems">OSCAR → Systems</option>
-                                    <option value="systems_to_oscar">Systems → OSCAR</option>
-                                </select>
+                                <label for="gus-id"><i class="fas fa-user"></i> GUS ID</label>
+                                <input type="text" id="gus-id" name="gus_id" placeholder="e.g., GUS01">
+                                <div class="input-info">Globex User Signature ID (any length)</div>
+                            </div>
+                            <div class="form-group">
+                                <label for="contact-id"><i class="fas fa-address-book"></i> Contact ID</label>
+                                <input type="text" id="contact-id" name="contact_id" placeholder="Contact Identifier">
+                                <div class="input-info">Associated Contact Identifier</div>
+                            </div>
+                            <div class="form-group">
+                                <label for="session-id"><i class="fas fa-plug"></i> Session ID</label>
+                                <input type="text" id="session-id" name="session_id" placeholder="e.g., MDBLZ, FIF">
+                                <div class="input-info">Trading Session Identifier</div>
                             </div>
                         </div>
-                    </div>
+                        
+                        <div class="scenario-selector">
+                            <h4><i class="fas fa-cogs"></i> Comparison Scenarios</h4>
+                            <div class="scenario-grid">
+                                <div class="form-group">
+                                    <label for="comparison-type">Primary Comparison</label>
+                                    <select id="comparison-type" name="comparison_type">
+                                        <option value="guid_lookup">Standard GUID Lookup</option>
+                                        <option value="scenario_2_1">Scenario 2.1 - Both Expired</option>
+                                        <option value="scenario_2_2">Scenario 2.2 - OSCAR Expired, COPPER Active</option>
+                                        <option value="scenario_2_3">Scenario 2.3 - OSCAR Expired, COPPER Missing</option>
+                                        <option value="scenario_2_4">Scenario 2.4 - OSCAR Active, COPPER Missing</option>
+                                    </select>
+                                </div>
+                                <div class="form-group">
+                                    <label for="comparison-field">Compare By</label>
+                                    <select id="comparison-field" name="comparison_field">
+                                        <option value="session_id">Session ID</option>
+                                        <option value="gus_id">GUS ID</option>
+                                        <option value="gfid">GFID</option>
+                                        <option value="contact_id">Contact ID</option>
+                                        <option value="product_id">Product ID</option>
+                                        <option value="status">Status</option>
+                                    </select>
+                                </div>
+                                <div class="form-group">
+                                    <label for="table-set">Table Set</label>
+                                    <select id="table-set" name="table_set">
+                                        <option value="both_star_edb">Both STAR & EDB</option>
+                                        <option value="star_only">STAR Only</option>
+                                        <option value="edb_only">EDB Only</option>
+                                    </select>
+                                </div>
+                                <div class="form-group">
+                                    <label for="sync-direction">Sync Direction</label>
+                                    <select id="sync-direction" name="sync_direction">
+                                        <option value="bidirectional">Bidirectional</option>
+                                        <option value="oscar_to_systems">OSCAR → Systems</option>
+                                        <option value="systems_to_oscar">Systems → OSCAR</option>
+                                    </select>
+                                </div>
+                            </div>
+                        </div>
 
-                    <button type="submit" class="execute-btn" id="submit-btn">
-                        <i class="fas fa-sync-alt"></i>
-                        Execute Reconciliation
-                    </button>
-                </form>
-            </div>
-        </section>
-
-        <!-- Results Section -->
-        <section class="results-section" id="results-section">
-            <div class="results-header">
-                <h3><i class="fas fa-chart-bar"></i> Reconciliation Results</h3>
-                <div class="results-actions">
-                    <button class="btn-secondary" id="export-btn">
-                        <i class="fas fa-download"></i> Export Results
-                    </button>
-                    <button class="btn-secondary" id="refresh-btn">
-                        <i class="fas fa-refresh"></i> Refresh Data
-                    </button>
-                    <button class="btn-secondary" id="clear-results-btn">
-                        <i class="fas fa-times"></i> Clear Results
-                    </button>
+                        <div class="submit-container">
+                            <button type="submit" class="btn-primary" id="submit-btn">
+                                <i class="fas fa-sync-alt"></i>
+                                <span>Execute Reconciliation</span>
+                            </button>
+                        </div>
+                    </form>
                 </div>
-            </div>
-
-            <!-- Summary Cards -->
-            <div class="summary-cards">
-                <div class="summary-card total">
-                    <div class="card-number" id="total-records">259</div>
-                    <div class="card-label">Total Records</div>
-                </div>
-                <div class="summary-card matches">
-                    <div class="card-number" id="total-matches">193</div>
-                    <div class="card-label">Matches</div>
-                </div>
-                <div class="summary-card mismatches">
-                    <div class="card-number" id="total-mismatches">54</div>
-                    <div class="card-label">Mismatches</div>
-                </div>
-                <div class="summary-card missing">
-                    <div class="card-number" id="total-missing">12</div>
-                    <div class="card-label">Missing Records</div>
-                </div>
-            </div>
-
-            <!-- Scenario Info -->
-            <div class="scenario-info" id="scenario-info" style="display: none;">
-                <div class="scenario-header">
-                    <div class="scenario-title">SYNCHRONIZED: Data is synchronized between systems</div>
-                    <div class="severity-badge">LOW</div>
-                </div>
-                <div class="scenario-content">
-                    <p><strong>Input:</strong> <span id="scenario-input">TEST123</span> (<span id="scenario-type">GUID</span>)</p>
-                    <p><strong>Status:</strong> <span id="scenario-status">Data found in both systems</span></p>
-                    <div id="action-buttons">
-                        <button class="action-btn">
-                            <i class="fas fa-check"></i> No action required
+            </section>
+            
+            <section class="results-section" id="results-section">
+                <div class="results-header">
+                    <h3><i class="fas fa-chart-bar"></i> Reconciliation Results</h3>
+                    <div class="results-actions">
+                        <button class="btn-secondary" id="export-btn">
+                            <i class="fas fa-file-download"></i> Export Results
+                        </button>
+                        <button class="btn-secondary" id="refresh-btn">
+                            <i class="fas fa-redo"></i> Refresh Data
+                        </button>
+                        <button class="btn-secondary" id="clear-results-btn">
+                            <i class="fas fa-times"></i> Clear Results
                         </button>
                     </div>
                 </div>
-            </div>
 
-            <!-- Comparison Tables -->
-            <div class="comparison-tables">
-                <!-- OSCAR ↔ CoPPER ↔ STAR Comparison -->
-                <div class="table-container">
-                    <div class="table-header">
-                        <h4><i class="fas fa-database"></i> OSCAR ↔ CoPPER ↔ STAR Comparison</h4>
+                <div class="summary-cards">
+                    <div class="summary-card total">
+                        <div class="card-number" id="total-records">259</div>
+                        <div class="card-label">Total Records</div>
                     </div>
-                    <div class="table-wrapper">
-                        <table class="comparison-table">
-                            <thead>
-                                <tr>
-                                    <th>Record ID</th>
-                                    <th class="oscar-col">GUID</th>
-                                    <th class="oscar-col">Status</th>
-                                    <th class="oscar-col">Last Updated</th>
-                                    <th class="copper-col">GFID</th>
-                                    <th class="copper-col">Status</th>
-                                    <th class="copper-col">Session ID</th>
-                                    <th class="star-col">Product ID</th>
-                                    <th class="star-col">Status</th>
-                                    <th class="star-col">Settlement</th>
-                                    <th>Status</th>
-                                    <th>Actions</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                <tr>
-                                    <td>001</td>
-                                    <td class="oscar-col">TESTGUID001</td>
-                                    <td class="oscar-col">ACTIVE</td>
-                                    <td class="oscar-col">2024-01-15</td>
-                                    <td class="copper-col">TEST</td>
-                                    <td class="copper-col">ACTIVE</td>
-                                    <td class="copper-col">MDBLZ</td>
-                                    <td class="star-col">ACTIVES</td>
-                                    <td class="star-col">ACTIVE</td>
-                                    <td class="star-col">COMPLETE</td>
-                                    <td><span class="status-badge match">MATCH</span></td>
-                                    <td><button class="action-icon"><i class="fas fa-eye"></i></button></td>
-                                </tr>
-                                <tr>
-                                    <td>002</td>
-                                    <td class="oscar-col">TESTGUID002</td>
-                                    <td class="oscar-col">EXPIRED</td>
-                                    <td class="oscar-col">2023-12-31</td>
-                                    <td class="copper-col">TEST</td>
-                                    <td class="copper-col">ACTIVE</td>
-                                    <td class="copper-col">FIF</td>
-                                    <td class="star-col">-</td>
-                                    <td class="star-col">-</td>
-                                    <td class="star-col">-</td>
-                                    <td><span class="status-badge mismatch">MISMATCH</span></td>
-                                    <td><button class="action-icon"><i class="fas fa-sync"></i></button></td>
-                                </tr>
-                                <tr>
-                                    <td>003</td>
-                                    <td class="oscar-col">TESTGUID003</td>
-                                    <td class="oscar-col">ACTIVE</td>
-                                    <td class="oscar-col">2024-01-10</td>
-                                    <td class="copper-col">-</td>
-                                    <td class="copper-col">-</td>
-                                    <td class="copper-col">-</td>
-                                    <td class="star-col">ACTIVES</td>
-                                    <td class="star-col">PENDING</td>
-                                    <td class="star-col">PENDING</td>
-                                    <td><span class="status-badge missing">MISSING</span></td>
-                                    <td><button class="action-icon"><i class="fas fa-plus"></i></button></td>
-                                </tr>
-                                <tr>
-                                    <td>004</td>
-                                    <td class="oscar-col">TESTGUID004</td>
-                                    <td class="oscar-col">ACTIVE</td>
-                                    <td class="oscar-col">2024-01-12</td>
-                                    <td class="copper-col">TEST</td>
-                                    <td class="copper-col">ACTIVE</td>
-                                    <td class="copper-col">MDBLZ</td>
-                                    <td class="star-col">ACTIVES</td>
-                                    <td class="star-col">ACTIVE</td>
-                                    <td class="star-col">COMPLETE</td>
-                                    <td><span class="status-badge match">MATCH</span></td>
-                                    <td><button class="action-icon"><i class="fas fa-eye"></i></button></td>
-                                </tr>
-                            </tbody>
-                        </table>
+                    <div class="summary-card matches">
+                        <div class="card-number" id="total-matches">193</div>
+                        <div class="card-label">Matches</div>
+                    </div>
+                    <div class="summary-card mismatches">
+                        <div class="card-number" id="total-mismatches">54</div>
+                        <div class="card-label">Mismatches</div>
+                    </div>
+                    <div class="summary-card missing">
+                        <div class="card-number" id="total-missing">12</div>
+                        <div class="card-label">Missing Records</div>
                     </div>
                 </div>
 
-                <!-- OSCAR ↔ CoPPER ↔ EDB Comparison -->
-                <div class="table-container">
-                    <div class="table-header">
-                        <h4><i class="fas fa-database"></i> OSCAR ↔ CoPPER ↔ EDB Comparison</h4>
+                <div class="comparison-tables">
+                    <div class="table-section">
+                        <div class="table-header">
+                            <h4><i class="fas fa-database"></i> OSCAR ↔ CoPPER ↔ STAR Comparison</h4>
+                        </div>
+                        <div class="table-container">
+                            <table class="comparison-table">
+                                <thead>
+                                    <tr>
+                                        <th rowspan="2">Record ID</th>
+                                        <th colspan="3" class="db-header oscar-col">OSCAR</th>
+                                        <th colspan="3" class="db-header copper-col">CoPPER</th>
+                                        <th colspan="3" class="db-header star-col">STAR</th>
+                                        <th rowspan="2">Status</th>
+                                        <th rowspan="2">Actions</th>
+                                    </tr>
+                                    <tr>
+                                        <th class="oscar-col">GUID</th>
+                                        <th class="oscar-col">Status</th>
+                                        <th class="oscar-col">Last Updated</th>
+                                        <th class="copper-col">GFID</th>
+                                        <th class="copper-col">GUS ID</th>
+                                        <th class="copper-col">Session ID</th>
+                                        <th class="star-col">Product ID</th>
+                                        <th class="star-col">Status</th>
+                                        <th class="star-col">Settlement</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <tr>
+                                        <td>001</td>
+                                        <td class="oscar-col">TESTGUID001</td>
+                                        <td class="oscar-col">ACTIVE</td>
+                                        <td class="oscar-col">2024-01-15</td>
+                                        <td class="copper-col">TEST</td>
+                                        <td class="copper-col">GUS01</td>
+                                        <td class="copper-col">MDBLZ</td>
+                                        <td class="star-col">ACTIVES</td>
+                                        <td class="star-col">ACTIVE</td>
+                                        <td class="star-col">COMPLETE</td>
+                                        <td><span class="status-badge status-match">MATCH</span></td>
+                                        <td><button class="btn-secondary table-action"><i class="fas fa-eye"></i></button></td>
+                                    </tr>
+                                    <tr>
+                                        <td>002</td>
+                                        <td class="oscar-col">TESTGUID002</td>
+                                        <td class="oscar-col">EXPIRED</td>
+                                        <td class="oscar-col">2023-12-31</td>
+                                        <td class="copper-col">TEST</td>
+                                        <td class="copper-col">GUS02</td>
+                                        <td class="copper-col">FIF</td>
+                                        <td class="star-col">-</td>
+                                        <td class="star-col">-</td>
+                                        <td class="star-col">-</td>
+                                        <td><span class="status-badge status-mismatch">MISMATCH</span></td>
+                                        <td><button class="btn-secondary table-action"><i class="fas fa-sync"></i></button></td>
+                                    </tr>
+                                    <tr>
+                                        <td>003</td>
+                                        <td class="oscar-col">TESTGUID003</td>
+                                        <td class="oscar-col"></td>
+                                        <td class="oscar-col"></td>
+                                        <td class="copper-col">BTEC</td>
+                                        <td class="copper-col">GUS01</td>
+                                        <td class="copper-col">FIF</td>
+                                        <td class="star-col">ACTIVES</td>
+                                        <td class="star-col">PENDING</td>
+                                        <td class="star-col">PENDING</td>
+                                        <td><span class="status-badge status-missing">MISSING</span></td>
+                                        <td><button class="btn-secondary table-action"><i class="fas fa-plus"></i></button></td>
+                                    </tr>
+                                    <tr>
+                                        <td>004</td>
+                                        <td class="oscar-col">TESTGUID004</td>
+                                        <td class="oscar-col">ACTIVE</td>
+                                        <td class="oscar-col">2024-01-12</td>
+                                        <td class="copper-col">TEST</td>
+                                        <td class="copper-col">GUS04</td>
+                                        <td class="copper-col">MDBLZ</td>
+                                        <td class="star-col">ACTIVES</td>
+                                        <td class="star-col">ACTIVE</td>
+                                        <td class="star-col">COMPLETE</td>
+                                        <td><span class="status-badge status-match">MATCH</span></td>
+                                        <td><button class="btn-secondary table-action"><i class="fas fa-eye"></i></button></td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
                     </div>
-                    <div class="table-wrapper">
-                        <table class="comparison-table">
-                            <thead>
-                                <tr>
-                                    <th>Record ID</th>
-                                    <th class="oscar-col">GUID</th>
-                                    <th class="oscar-col">GUS ID</th>
-                                    <th class="copper-col">Contact ID</th>
-                                    <th class="copper-col">Session ID</th>
-                                    <th class="copper-col">Product</th>
-                                    <th class="copper-col">Permission</th>
-                                    <th class="edb-col">Entity ID</th>
-                                    <th class="edb-col">Type</th>
-                                    <th class="edb-col">Schema</th>
-                                    <th>Status</th>
-                                    <th>Actions</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                <tr>
-                                    <td>E001</td>
-                                    <td class="oscar-col">TESTGUID005</td>
-                                    <td class="oscar-col">GUS01</td>
-                                    <td class="copper-col">CONT001</td>
-                                    <td class="copper-col">MDBLZ</td>
-                                    <td class="copper-col">BTEC_EU</td>
-                                    <td class="copper-col">READ_WRITE</td>
-                                    <td class="edb-col">ENT001</td>
-                                    <td class="edb-col">USER</td>
-                                    <td class="edb-col">TRADING</td>
-                                    <td><span class="status-badge match">MATCH</span></td>
-                                    <td><button class="action-icon"><i class="fas fa-eye"></i></button></td>
-                                </tr>
-                                <tr>
-                                    <td>E002</td>
-                                    <td class="oscar-col">TESTGUID006</td>
-                                    <td class="oscar-col">GUS02</td>
-                                    <td class="copper-col">CONT002</td>
-                                    <td class="copper-col">FIF</td>
-                                    <td class="copper-col">EBS</td>
-                                    <td class="copper-col">READ_ONLY</td>
-                                    <td class="edb-col">-</td>
-                                    <td class="edb-col">-</td>
-                                    <td class="edb-col">-</td>
-                                    <td><span class="status-badge missing">MISSING</span></td>
-                                    <td><button class="action-icon"><i class="fas fa-plus"></i></button></td>
-                                </tr>
-                                <tr>
-                                    <td>E003</td>
-                                    <td class="oscar-col">TESTGUID007</td>
-                                    <td class="oscar-col">GUS03</td>
-                                    <td class="copper-col">CONT003</td>
-                                    <td class="copper-col">MDBLZ</td>
-                                    <td class="copper-col">CME_FO</td>
-                                    <td class="copper-col">ADMIN</td>
-                                    <td class="edb-col">ENT003</td>
-                                    <td class="edb-col">ADMIN</td>
-                                    <td class="edb-col">MANAGEMENT</td>
-                                    <td><span class="status-badge mismatch">MISMATCH</span></td>
-                                    <td><button class="action-icon"><i class="fas fa-sync"></i></button></td>
-                                </tr>
-                                <tr>
-                                    <td>E004</td>
-                                    <td class="oscar-col">TESTGUID008</td>
-                                    <td class="oscar-col">GUS04</td>
-                                    <td class="copper-col">CONT004</td>
-                                    <td class="copper-col">FIF</td>
-                                    <td class="copper-col">BTEC_US</td>
-                                    <td class="copper-col">READ_WRITE</td>
-                                    <td class="edb-col">ENT004</td>
-                                    <td class="edb-col">USER</td>
-                                    <td class="edb-col">TRADING</td>
-                                    <td><span class="status-badge match">MATCH</span></td>
-                                    <td><button class="action-icon"><i class="fas fa-eye"></i></button></td>
-                                </tr>
-                            </tbody>
-                        </table>
+
+                    <div class="table-section">
+                        <div class="table-header">
+                            <h4><i class="fas fa-database"></i> OSCAR ↔ CoPPER ↔ EDB Comparison</h4>
+                        </div>
+                        <div class="table-container">
+                            <table class="comparison-table">
+                                <thead>
+                                    <tr>
+                                        <th rowspan="2">Record ID</th>
+                                        <th colspan="3" class="db-header oscar-col">OSCAR</th>
+                                        <th colspan="3" class="db-header copper-col">CoPPER</th>
+                                        <th colspan="3" class="db-header edb-col">EDB</th>
+                                        <th rowspan="2">Status</th>
+                                        <th rowspan="2">Actions</th>
+                                    </tr>
+                                    <tr>
+                                        <th class="oscar-col">GUID</th>
+                                        <th class="oscar-col">GUS ID</th>
+                                        <th class="oscar-col">Contact ID</th>
+                                        <th class="copper-col">Session ID</th>
+                                        <th class="copper-col">Product</th>
+                                        <th class="copper-col">Permission</th>
+                                        <th class="edb-col">Entity ID</th>
+                                        <th class="edb-col">Type</th>
+                                        <th class="edb-col">Schema</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <tr>
+                                        <td>E001</td>
+                                        <td class="oscar-col">TESTGUID005</td>
+                                        <td class="oscar-col">GUS01</td>
+                                        <td class="oscar-col">CONT001</td>
+                                        <td class="copper-col">MDBLZ</td>
+                                        <td class="copper-col">BTEC_EU</td>
+                                        <td class="copper-col">READ_WRITE</td>
+                                        <td class="edb-col">ENT001</td>
+                                        <td class="edb-col">USER</td>
+                                        <td class="edb-col">TRADING</td>
+                                        <td><span class="status-badge status-match">MATCH</span></td>
+                                        <td><button class="btn-secondary table-action"><i class="fas fa-eye"></i></button></td>
+                                    </tr>
+                                    <tr>
+                                        <td>E002</td>
+                                        <td class="oscar-col">TESTGUID006</td>
+                                        <td class="oscar-col">GUS02</td>
+                                        <td class="oscar-col">CONT002</td>
+                                        <td class="copper-col">FIF</td>
+                                        <td class="copper-col">EBS</td>
+                                        <td class="copper-col">READ_ONLY</td>
+                                        <td class="edb-col">-</td>
+                                        <td class="edb-col">-</td>
+                                        <td class="edb-col">-</td>
+                                        <td><span class="status-badge status-missing">MISSING</span></td>
+                                        <td><button class="btn-secondary table-action"><i class="fas fa-plus"></i></button></td>
+                                    </tr>
+                                    <tr>
+                                        <td>E003</td>
+                                        <td class="oscar-col">TESTGUID007</td>
+                                        <td class="oscar-col">GUS03</td>
+                                        <td class="oscar-col">CONT003</td>
+                                        <td class="copper-col">MDBLZ</td>
+                                        <td class="copper-col">CME_FO</td>
+                                        <td class="copper-col">ADMIN</td>
+                                        <td class="edb-col">ENT003</td>
+                                        <td class="edb-col">ADMIN</td>
+                                        <td class="edb-col">MANAGEMENT</td>
+                                        <td><span class="status-badge status-mismatch">MISMATCH</span></td>
+                                        <td><button class="btn-secondary table-action"><i class="fas fa-sync"></i></button></td>
+                                    </tr>
+                                    <tr>
+                                        <td>E004</td>
+                                        <td class="oscar-col">TESTGUID008</td>
+                                        <td class="oscar-col">GUS04</td>
+                                        <td class="oscar-col">CONT004</td>
+                                        <td class="copper-col">FIF</td>
+                                        <td class="copper-col">BTEC_US</td>
+                                        <td class="copper-col">READ_WRITE</td>
+                                        <td class="edb-col">ENT004</td>
+                                        <td class="edb-col">USER</td>
+                                        <td class="edb-col">TRADING</td>
+                                        <td><span class="status-badge status-match">MATCH</span></td>
+                                        <td><button class="btn-secondary table-action"><i class="fas fa-eye"></i></button></td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
                     </div>
                 </div>
-            </div>
-        </section>
+            </section>
+        </div>
     </main>
 
     <script src="{{ url_for('static', filename='js/dynamic_javascript_original_ui.js') }}"></script>
+</body>
+</html>
 
 
 
@@ -376,7 +367,15 @@
 
 
 
-    /* Modern OSCAR Reconciliation Tool Styles */
+
+
+
+
+
+
+
+
+/* Reset and Base Styles */
 * {
     margin: 0;
     padding: 0;
@@ -384,38 +383,51 @@
 }
 
 :root {
-    /* Blue Theme Colors */
-    --primary-blue: #4A90E2;
-    --primary-blue-dark: #357ABD;
-    --primary-blue-light: #6BA3E8;
+    /* Color Palette - Using exact provided colors */
+    --primary-color: #1a365d;
+    --primary-light: #2c5aa0;
+    --primary-dark: #0f2537;
+    --secondary-color: #e53e3e;
+    --accent-color: #00b4d8;
+    --success-color: #38a169;
+    --warning-color: #ed8936;
+    --error-color: #e53e3e;
     
-    /* Background Colors */
-    --dark-bg: #2C3E50;
-    --darker-bg: #1A252F;
-    --card-bg: #34495E;
-    --input-bg: #273746;
+    /* Neutral Colors - Dark theme */
+    --white: #ffffff;
+    --gray-50: #f9fafb;
+    --gray-100: #f3f4f6;
+    --gray-200: #e5e7eb;
+    --gray-300: #d1d5db;
+    --gray-400: #9ca3af;
+    --gray-500: #6b7280;
+    --gray-600: #4b5563;
+    --gray-700: #374151;
+    --gray-800: #1f2937;
+    --gray-900: #111827;
     
-    /* Text Colors */
-    --text-primary: #FFFFFF;
-    --text-secondary: #BDC3C7;
-    --text-muted: #95A5A6;
+    /* Dark Background Variants */
+    --bg-primary: #0f1419;
+    --bg-secondary: #1a252f;
+    --bg-card: #2d3748;
+    --bg-darker: #1a202c;
     
-    /* Status Colors */
-    --accent-green: #27AE60;
-    --accent-red: #E74C3C;
-    --accent-orange: #F39C12;
-    --accent-yellow: #F1C40F;
+    /* Gradients */
+    --gradient-primary: linear-gradient(135deg, var(--primary-color) 0%, var(--primary-light) 100%);
+    --gradient-success: linear-gradient(135deg, var(--success-color) 0%, #48bb78 100%);
+    --gradient-warning: linear-gradient(135deg, var(--warning-color) 0%, #f6ad55 100%);
+    --gradient-error: linear-gradient(135deg, var(--error-color) 0%, #fc8181 100%);
     
-    /* Border and Shadow */
-    --border-color: #3D5A75;
-    --border-light: #52708B;
-    --shadow-primary: 0 8px 32px rgba(0,0,0,0.3);
-    --shadow-card: 0 4px 20px rgba(0,0,0,0.2);
-    
-    /* Gradients - All Blue Theme */
-    --gradient-header: linear-gradient(135deg, #4A90E2 0%, #357ABD 50%, #2E6DA4 100%);
-    --gradient-button: linear-gradient(135deg, #4A90E2 0%, #357ABD 100%);
-    --gradient-bg: linear-gradient(135deg, #1A252F 0%, #2C3E50 100%);
+    /* Typography */
+    --font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
+    --font-size-xs: 0.75rem;
+    --font-size-sm: 0.875rem;
+    --font-size-base: 1rem;
+    --font-size-lg: 1.125rem;
+    --font-size-xl: 1.25rem;
+    --font-size-2xl: 1.5rem;
+    --font-size-3xl: 1.875rem;
+    --font-size-4xl: 2.25rem;
     
     /* Spacing */
     --spacing-xs: 0.25rem;
@@ -424,53 +436,56 @@
     --spacing-lg: 1.5rem;
     --spacing-xl: 2rem;
     --spacing-2xl: 3rem;
-    
-    /* Typography */
-    --font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-    --font-size-xs: 0.75rem;
-    --font-size-sm: 0.875rem;
-    --font-size-base: 1rem;
-    --font-size-lg: 1.125rem;
-    --font-size-xl: 1.25rem;
-    --font-size-2xl: 1.5rem;
-    --font-size-3xl: 2rem;
+    --spacing-3xl: 4rem;
     
     /* Border Radius */
-    --radius-sm: 6px;
-    --radius-md: 8px;
-    --radius-lg: 12px;
-    --radius-xl: 15px;
-    --radius-2xl: 20px;
+    --radius-sm: 0.375rem;
+    --radius-md: 0.5rem;
+    --radius-lg: 0.75rem;
+    --radius-xl: 1rem;
+    
+    /* Shadows - Enhanced for depth */
+    --shadow-sm: 0 2px 4px 0 rgba(0, 0, 0, 0.1);
+    --shadow-md: 0 6px 12px -2px rgba(0, 0, 0, 0.15), 0 4px 8px -2px rgba(0, 0, 0, 0.1);
+    --shadow-lg: 0 12px 24px -4px rgba(0, 0, 0, 0.2), 0 8px 16px -4px rgba(0, 0, 0, 0.1);
+    --shadow-xl: 0 24px 48px -8px rgba(0, 0, 0, 0.25), 0 16px 32px -8px rgba(0, 0, 0, 0.15);
     
     /* Transitions */
-    --transition-fast: 0.2s ease;
-    --transition-normal: 0.3s ease;
-    --transition-slow: 0.5s ease;
+    --transition-fast: 0.15s ease-in-out;
+    --transition-normal: 0.3s ease-in-out;
+    --transition-slow: 0.5s ease-in-out;
 }
 
-/* Base Styles */
+/* Base Typography */
 body {
     font-family: var(--font-family);
-    background: var(--gradient-bg);
-    color: var(--text-primary);
-    min-height: 100vh;
+    font-size: var(--font-size-base);
     line-height: 1.6;
+    color: var(--white);
+    background: var(--bg-primary);
+    min-height: 100vh;
+}
+
+/* Layout */
+.container {
+    max-width: 1400px;
+    margin: 0 auto;
+    padding: 0 var(--spacing-lg);
 }
 
 /* Header */
 .header {
-    background: var(--gradient-header);
+    background: var(--gradient-primary);
+    color: var(--white);
     padding: var(--spacing-lg) 0;
-    box-shadow: var(--shadow-primary);
+    box-shadow: var(--shadow-xl);
     position: sticky;
     top: 0;
     z-index: 100;
+    border-bottom: 2px solid var(--accent-color);
 }
 
 .header-content {
-    max-width: 1200px;
-    margin: 0 auto;
-    padding: 0 var(--spacing-xl);
     display: flex;
     justify-content: space-between;
     align-items: center;
@@ -484,103 +499,113 @@ body {
 
 .logo i {
     font-size: var(--font-size-2xl);
-    color: var(--text-primary);
+    color: var(--accent-color);
+    text-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
 }
 
 .logo h1 {
     font-size: var(--font-size-2xl);
     font-weight: 700;
-    color: var(--text-primary);
     margin: 0;
+    text-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
 }
 
 .connection-status {
     display: flex;
     align-items: center;
     gap: var(--spacing-sm);
-    background: rgba(255,255,255,0.15);
-    padding: var(--spacing-sm) var(--spacing-lg);
-    border-radius: 25px;
+    background: rgba(255, 255, 255, 0.15);
+    padding: var(--spacing-sm) var(--spacing-md);
+    border-radius: var(--radius-lg);
     backdrop-filter: blur(10px);
-    border: 1px solid rgba(255,255,255,0.1);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    box-shadow: var(--shadow-md);
 }
 
 .status-dot {
-    width: 8px;
-    height: 8px;
+    width: 10px;
+    height: 10px;
     border-radius: 50%;
-    background: var(--accent-green);
+    background: var(--warning-color);
+    animation: pulse 2s infinite;
+    box-shadow: 0 0 8px currentColor;
 }
 
-.connection-status span {
-    font-size: var(--font-size-sm);
-    font-weight: 500;
-    color: var(--text-primary);
+.status-dot.connected {
+    background: var(--success-color);
 }
 
-/* Main Container */
-.container {
-    max-width: 1200px;
-    margin: 0 auto;
-    padding: var(--spacing-xl);
+.status-dot.disconnected {
+    background: var(--error-color);
+}
+
+/* Main Content */
+.main-content {
+    padding: var(--spacing-2xl) 0;
+    min-height: calc(100vh - 200px);
 }
 
 /* Welcome Section */
 .welcome-section {
     text-align: center;
-    margin-bottom: var(--spacing-2xl);
+    margin-bottom: var(--spacing-3xl);
 }
 
 .welcome-content h2 {
     font-size: var(--font-size-3xl);
     font-weight: 700;
-    color: var(--primary-blue);
+    color: var(--accent-color);
     margin-bottom: var(--spacing-md);
-    line-height: 1.2;
+    text-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
 }
 
 .welcome-content p {
-    color: var(--text-secondary);
     font-size: var(--font-size-lg);
+    color: var(--gray-300);
     max-width: 600px;
     margin: 0 auto;
 }
 
-/* Form Card */
-.form-card {
-    background: var(--card-bg);
+/* Search Section */
+.search-section {
+    margin-bottom: var(--spacing-3xl);
+}
+
+.search-card {
+    background: var(--bg-card);
     border-radius: var(--radius-xl);
     padding: var(--spacing-2xl);
-    margin-bottom: var(--spacing-2xl);
-    border: 1px solid var(--border-color);
-    box-shadow: var(--shadow-card);
+    box-shadow: var(--shadow-xl);
+    border: 2px solid var(--primary-color);
+    backdrop-filter: blur(10px);
 }
 
-.form-header {
+.search-header {
     text-align: center;
-    margin-bottom: var(--spacing-2xl);
+    margin-bottom: var(--spacing-xl);
 }
 
-.form-header h3 {
-    color: var(--primary-blue);
+.search-header h3 {
     font-size: var(--font-size-xl);
     font-weight: 600;
+    color: var(--accent-color);
     margin-bottom: var(--spacing-sm);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: var(--spacing-sm);
 }
 
-.form-header p {
-    color: var(--text-secondary);
+.search-header h3 i {
+    margin-right: var(--spacing-sm);
+    color: var(--accent-color);
+}
+
+.search-header p {
+    color: var(--gray-300);
     font-size: var(--font-size-sm);
 }
 
 /* Form Grid */
 .form-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
     gap: var(--spacing-lg);
     margin-bottom: var(--spacing-2xl);
 }
@@ -588,129 +613,178 @@ body {
 .form-group {
     display: flex;
     flex-direction: column;
+    gap: var(--spacing-sm);
 }
 
 .form-group label {
-    color: var(--text-primary);
-    font-weight: 500;
-    margin-bottom: var(--spacing-sm);
     font-size: var(--font-size-sm);
+    font-weight: 600;
+    color: var(--white);
 }
 
-.form-group input, 
+.form-group label i {
+    color: var(--accent-color);
+    margin-right: var(--spacing-xs);
+}
+
+.form-group input,
 .form-group select {
-    background: var(--input-bg);
-    border: 1px solid var(--border-color);
-    border-radius: var(--radius-md);
     padding: var(--spacing-md);
-    color: var(--text-primary);
-    font-size: var(--font-size-sm);
-    transition: all var(--transition-normal);
-    font-family: var(--font-family);
+    border: 2px solid var(--primary-color);
+    border-radius: var(--radius-lg);
+    font-size: var(--font-size-base);
+    transition: var(--transition-normal);
+    background: var(--bg-darker);
+    color: var(--white);
+    box-shadow: var(--shadow-sm);
 }
 
-.form-group input:focus, 
+.form-group input:focus,
 .form-group select:focus {
     outline: none;
-    border-color: var(--primary-blue);
-    box-shadow: 0 0 0 2px rgba(74, 144, 226, 0.2);
-    background: var(--darker-bg);
+    border-color: var(--accent-color);
+    box-shadow: 0 0 0 3px rgba(0, 180, 216, 0.2);
+    transform: translateY(-1px);
 }
 
 .form-group input::placeholder {
-    color: var(--text-muted);
+    color: var(--gray-400);
 }
 
 .input-info {
     font-size: var(--font-size-xs);
-    color: var(--text-muted);
-    margin-top: var(--spacing-xs);
+    color: var(--gray-400);
 }
 
-/* Comparison Scenarios */
-.comparison-scenarios {
-    background: var(--input-bg);
+/* Scenario Selector */
+.scenario-selector {
+    background: var(--bg-darker);
     border-radius: var(--radius-lg);
     padding: var(--spacing-xl);
-    margin-bottom: var(--spacing-2xl);
-    border: 1px solid var(--border-light);
+    margin-bottom: var(--spacing-xl);
+    border: 2px solid var(--primary-dark);
+    box-shadow: var(--shadow-lg);
 }
 
-.comparison-scenarios h4 {
-    color: var(--primary-blue);
+.scenario-selector h4 {
     font-size: var(--font-size-lg);
     font-weight: 600;
+    color: var(--accent-color);
     margin-bottom: var(--spacing-lg);
-    display: flex;
-    align-items: center;
-    gap: var(--spacing-sm);
+}
+
+.scenario-selector h4 i {
+    margin-right: var(--spacing-sm);
+    color: var(--accent-color);
 }
 
 .scenario-grid {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-    gap: var(--spacing-lg);
+    gap: var(--spacing-md);
 }
 
-/* Execute Button */
-.execute-btn {
-    background: var(--gradient-button);
-    color: var(--text-primary);
+/* Submit Container */
+.submit-container {
+    text-align: center;
+    margin-top: var(--spacing-xl);
+}
+
+/* Buttons */
+.btn-primary {
+    background: var(--gradient-primary);
+    color: var(--white);
     border: none;
     padding: var(--spacing-lg) var(--spacing-2xl);
     border-radius: var(--radius-lg);
-    font-size: var(--font-size-base);
+    font-size: var(--font-size-lg);
     font-weight: 600;
     cursor: pointer;
-    transition: all var(--transition-normal);
+    transition: var(--transition-normal);
     display: flex;
     align-items: center;
     justify-content: center;
     gap: var(--spacing-sm);
-    width: 100%;
-    box-shadow: 0 4px 15px rgba(74, 144, 226, 0.3);
-    font-family: var(--font-family);
+    box-shadow: var(--shadow-lg);
+    white-space: nowrap;
+    border: 2px solid var(--accent-color);
+    min-width: 250px;
+    margin: 0 auto;
 }
 
-.execute-btn:hover:not(:disabled) {
-    transform: translateY(-2px);
-    box-shadow: 0 6px 20px rgba(74, 144, 226, 0.4);
-    background: linear-gradient(135deg, var(--primary-blue-light) 0%, var(--primary-blue) 100%);
+.btn-primary:hover:not(:disabled) {
+    transform: translateY(-3px);
+    box-shadow: var(--shadow-xl);
+    border-color: var(--white);
 }
 
-.execute-btn:active {
-    transform: translateY(0);
+.btn-primary:active {
+    transform: translateY(-1px);
 }
 
-.execute-btn:disabled {
+.btn-primary:disabled {
     opacity: 0.6;
     cursor: not-allowed;
     transform: none;
 }
 
+.btn-secondary {
+    background: var(--bg-card);
+    color: var(--white);
+    border: 2px solid var(--primary-color);
+    padding: var(--spacing-sm) var(--spacing-lg);
+    border-radius: var(--radius-lg);
+    font-size: var(--font-size-sm);
+    font-weight: 500;
+    cursor: pointer;
+    transition: var(--transition-normal);
+    display: flex;
+    align-items: center;
+    gap: var(--spacing-sm);
+    box-shadow: var(--shadow-md);
+}
+
+.btn-secondary:hover {
+    border-color: var(--accent-color);
+    color: var(--accent-color);
+    transform: translateY(-2px);
+    box-shadow: var(--shadow-lg);
+}
+
+.table-action {
+    padding: var(--spacing-xs) var(--spacing-sm);
+    font-size: var(--font-size-xs);
+    min-width: auto;
+    margin: 0;
+}
+
 /* Results Section */
 .results-section {
+    margin-bottom: var(--spacing-3xl);
     display: none;
 }
 
 .results-section.show {
     display: block;
+    animation: fadeInUp 0.8s ease-out;
 }
 
 .results-header {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    margin-bottom: var(--spacing-2xl);
+    margin-bottom: var(--spacing-xl);
 }
 
 .results-header h3 {
-    color: var(--primary-blue);
     font-size: var(--font-size-xl);
     font-weight: 600;
-    display: flex;
-    align-items: center;
-    gap: var(--spacing-sm);
+    color: var(--accent-color);
+}
+
+.results-header h3 i {
+    margin-right: var(--spacing-sm);
+    color: var(--accent-color);
 }
 
 .results-actions {
@@ -718,102 +792,85 @@ body {
     gap: var(--spacing-md);
 }
 
-.btn-secondary {
-    background: var(--card-bg);
-    color: var(--text-primary);
-    border: 1px solid var(--border-color);
-    padding: var(--spacing-sm) var(--spacing-lg);
-    border-radius: var(--radius-md);
-    font-size: var(--font-size-sm);
-    cursor: pointer;
-    transition: all var(--transition-normal);
-    display: flex;
-    align-items: center;
-    gap: var(--spacing-sm);
-    font-family: var(--font-family);
-    font-weight: 500;
-}
-
-.btn-secondary:hover {
-    background: var(--input-bg);
-    transform: translateY(-1px);
-    border-color: var(--primary-blue);
-}
-
 /* Summary Cards */
 .summary-cards {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
     gap: var(--spacing-lg);
-    margin-bottom: var(--spacing-2xl);
+    margin-bottom: var(--spacing-xl);
 }
 
 .summary-card {
-    background: var(--card-bg);
+    background: var(--bg-card);
     border-radius: var(--radius-xl);
     padding: var(--spacing-xl);
-    text-align: center;
+    box-shadow: var(--shadow-xl);
     border-left: 4px solid;
-    transition: all var(--transition-normal);
-    border: 1px solid var(--border-color);
-    position: relative;
-    overflow: hidden;
-}
-
-.summary-card::before {
-    content: '';
-    position: absolute;
-    top: 0;
-    left: 0;
-    right: 0;
-    height: 4px;
-    background: linear-gradient(90deg, transparent, rgba(255,255,255,0.1), transparent);
-    opacity: 0;
-    transition: opacity var(--transition-normal);
+    transition: var(--transition-normal);
+    border: 2px solid var(--primary-dark);
+    text-align: center;
 }
 
 .summary-card:hover {
     transform: translateY(-4px);
-    box-shadow: var(--shadow-card);
+    box-shadow: var(--shadow-xl);
+    border-color: var(--accent-color);
 }
 
-.summary-card:hover::before {
-    opacity: 1;
+.summary-card.total {
+    border-left-color: var(--accent-color);
 }
 
-.summary-card.total { border-left-color: var(--primary-blue); }
-.summary-card.matches { border-left-color: var(--accent-green); }
-.summary-card.mismatches { border-left-color: var(--accent-red); }
-.summary-card.missing { border-left-color: var(--accent-orange); }
+.summary-card.matches {
+    border-left-color: var(--success-color);
+}
+
+.summary-card.mismatches {
+    border-left-color: var(--error-color);
+}
+
+.summary-card.missing {
+    border-left-color: var(--warning-color);
+}
 
 .card-number {
-    font-size: var(--font-size-3xl);
+    font-size: var(--font-size-4xl);
     font-weight: 700;
     margin-bottom: var(--spacing-sm);
-    line-height: 1;
 }
 
-.total .card-number { color: var(--primary-blue); }
-.matches .card-number { color: var(--accent-green); }
-.mismatches .card-number { color: var(--accent-red); }
-.missing .card-number { color: var(--accent-orange); }
+.total .card-number {
+    color: var(--accent-color);
+}
+
+.matches .card-number {
+    color: var(--success-color);
+}
+
+.mismatches .card-number {
+    color: var(--error-color);
+}
+
+.missing .card-number {
+    color: var(--warning-color);
+}
 
 .card-label {
     font-size: var(--font-size-sm);
-    color: var(--text-secondary);
+    color: var(--gray-300);
     text-transform: uppercase;
-    letter-spacing: 0.5px;
-    font-weight: 500;
+    letter-spacing: 0.05em;
+    font-weight: 600;
 }
 
 /* Scenario Info */
 .scenario-info {
-    background: var(--card-bg);
+    background: var(--bg-card);
     border-radius: var(--radius-xl);
     padding: var(--spacing-xl);
-    margin-bottom: var(--spacing-2xl);
-    border: 1px solid var(--border-color);
-    border-left: 4px solid var(--accent-green);
+    margin-bottom: var(--spacing-xl);
+    border: 2px solid var(--success-color);
+    box-shadow: var(--shadow-xl);
 }
 
 .scenario-header {
@@ -824,344 +881,236 @@ body {
 }
 
 .scenario-title {
-    color: var(--text-primary);
+    color: var(--white);
     font-size: var(--font-size-lg);
     font-weight: 600;
 }
 
 .severity-badge {
     padding: var(--spacing-xs) var(--spacing-md);
-    border-radius: var(--radius-2xl);
+    border-radius: var(--radius-lg);
     font-size: var(--font-size-xs);
-    font-weight: 600;
+    font-weight: 700;
     text-transform: uppercase;
-    background: var(--accent-green);
-    color: var(--text-primary);
+    letter-spacing: 0.05em;
+}
+
+.severity-badge.low {
+    background: var(--success-color);
+    color: var(--white);
+    box-shadow: 0 0 8px var(--success-color);
 }
 
 .severity-badge.medium {
-    background: var(--accent-orange);
+    background: var(--warning-color);
+    color: var(--white);
+    box-shadow: 0 0 8px var(--warning-color);
 }
 
 .severity-badge.high {
-    background: var(--accent-red);
+    background: var(--error-color);
+    color: var(--white);
+    box-shadow: 0 0 8px var(--error-color);
 }
 
 .scenario-content p {
-    margin-bottom: var(--spacing-md);
-    color: var(--text-secondary);
+    margin-bottom: var(--spacing-lg);
+    color: var(--gray-300);
+    font-size: var(--font-size-base);
+}
+
+.scenario-content strong {
+    color: var(--white);
 }
 
 .action-btn {
-    background: var(--primary-blue);
-    color: var(--text-primary);
+    background: var(--gradient-primary);
+    color: var(--white);
     border: none;
     padding: var(--spacing-sm) var(--spacing-lg);
-    border-radius: var(--radius-md);
+    border-radius: var(--radius-lg);
     font-size: var(--font-size-sm);
     font-weight: 500;
     cursor: pointer;
-    transition: all var(--transition-normal);
-    margin-right: var(--spacing-sm);
-    margin-bottom: var(--spacing-sm);
+    transition: var(--transition-normal);
     display: inline-flex;
     align-items: center;
-    gap: var(--spacing-xs);
-    font-family: var(--font-family);
+    gap: var(--spacing-sm);
+    margin-right: var(--spacing-sm);
+    margin-bottom: var(--spacing-sm);
+    border: 1px solid var(--accent-color);
+    box-shadow: var(--shadow-md);
 }
 
 .action-btn:hover {
-    background: var(--primary-blue-dark);
-    transform: translateY(-1px);
+    transform: translateY(-2px);
+    box-shadow: var(--shadow-lg);
+    border-color: var(--white);
 }
 
 /* Comparison Tables */
 .comparison-tables {
     display: grid;
     gap: var(--spacing-2xl);
-    margin-bottom: var(--spacing-2xl);
+    margin-bottom: var(--spacing-xl);
 }
 
-.table-container {
-    background: var(--card-bg);
+.table-section {
+    background: var(--bg-card);
     border-radius: var(--radius-xl);
+    box-shadow: var(--shadow-xl);
     overflow: hidden;
-    border: 1px solid var(--border-color);
-    box-shadow: var(--shadow-card);
+    border: 2px solid var(--primary-color);
 }
 
 .table-header {
-    background: var(--primary-blue);
+    background: var(--gradient-primary);
     padding: var(--spacing-lg);
     text-align: center;
+    border-bottom: 2px solid var(--accent-color);
 }
 
 .table-header h4 {
-    color: var(--text-primary);
+    color: var(--white);
     font-size: var(--font-size-lg);
     font-weight: 600;
     margin: 0;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: var(--spacing-sm);
+    text-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
 }
 
-.table-wrapper {
+.table-header h4 i {
+    margin-right: var(--spacing-sm);
+    color: var(--accent-color);
+}
+
+.table-container {
     overflow-x: auto;
 }
 
 .comparison-table {
     width: 100%;
     border-collapse: collapse;
-    font-size: var(--font-size-sm);
+    background: var(--bg-darker);
 }
 
 .comparison-table th {
-    background: var(--input-bg);
+    background: var(--primary-dark);
     padding: var(--spacing-md);
     text-align: center;
-    font-weight: 600;
-    color: var(--text-primary);
-    border: 1px solid var(--border-color);
-    font-size: var(--font-size-xs);
+    font-weight: 700;
+    color: var(--white);
+    border: 2px solid var(--primary-color);
+    font-size: var(--font-size-sm);
     position: sticky;
     top: 0;
     z-index: 10;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
 }
 
 .comparison-table td {
     padding: var(--spacing-md);
     text-align: center;
-    border: 1px solid var(--border-color);
-    color: var(--text-primary);
-    font-size: var(--font-size-xs);
-}
-
-.comparison-table tbody tr {
-    transition: background-color var(--transition-fast);
+    border: 1px solid var(--primary-color);
+    font-size: var(--font-size-sm);
+    color: var(--white);
+    vertical-align: middle;
+    background: var(--bg-darker);
 }
 
 .comparison-table tbody tr:hover {
-    background: var(--input-bg);
+    background: var(--bg-card);
 }
 
-/* Column Styling */
-.oscar-col { 
-    background: rgba(74, 144, 226, 0.15); 
-    border-left: 2px solid var(--primary-blue);
+/* Column Styling with Enhanced Borders */
+.oscar-col {
+    background: rgba(26, 54, 93, 0.3) !important;
+    border-left: 3px solid var(--primary-color) !important;
 }
 
-.copper-col { 
-    background: rgba(39, 174, 96, 0.15); 
-    border-left: 2px solid var(--accent-green);
+.copper-col {
+    background: rgba(0, 180, 216, 0.3) !important;
+    border-left: 3px solid var(--accent-color) !important;
 }
 
-.star-col { 
-    background: rgba(241, 196, 15, 0.15); 
-    border-left: 2px solid var(--accent-yellow);
+.star-col {
+    background: rgba(237, 137, 54, 0.3) !important;
+    border-left: 3px solid var(--warning-color) !important;
 }
 
-.edb-col { 
-    background: rgba(231, 76, 60, 0.15); 
-    border-left: 2px solid var(--accent-red);
+.edb-col {
+    background: rgba(56, 163, 105, 0.3) !important;
+    border-left: 3px solid var(--success-color) !important;
 }
 
-/* Status Badges */
+.db-header {
+    font-weight: 700 !important;
+    font-size: var(--font-size-sm) !important;
+    letter-spacing: 0.1em !important;
+}
+
+/* Status Badges - Much more readable and prominent */
 .status-badge {
-    padding: var(--spacing-xs) var(--spacing-sm);
-    border-radius: var(--radius-xl);
+    padding: var(--spacing-sm) var(--spacing-md);
+    border-radius: var(--radius-lg);
     font-size: var(--font-size-xs);
-    font-weight: 600;
+    font-weight: 700;
     text-transform: uppercase;
-    display: inline-block;
-}
-
-.status-badge.match {
-    background: var(--accent-green);
-    color: var(--text-primary);
-}
-
-.status-badge.mismatch {
-    background: var(--accent-red);
-    color: var(--text-primary);
-}
-
-.status-badge.missing {
-    background: var(--accent-orange);
-    color: var(--text-primary);
-}
-
-/* Action Icons */
-.action-icon {
-    background: var(--primary-blue);
-    color: var(--text-primary);
-    border: none;
-    padding: var(--spacing-sm);
-    border-radius: 50%;
-    cursor: pointer;
-    transition: all var(--transition-normal);
-    font-size: var(--font-size-xs);
-    width: 28px;
-    height: 28px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-}
-
-.action-icon:hover {
-    background: var(--primary-blue-dark);
-    transform: scale(1.1);
-}
-
-/* Loading States */
-.loading {
-    opacity: 0.6;
-    pointer-events: none;
-}
-
-.spinner {
-    width: 20px;
-    height: 20px;
+    letter-spacing: 0.05em;
     border: 2px solid transparent;
-    border-top: 2px solid currentColor;
-    border-radius: 50%;
-    animation: spin 1s linear infinite;
+    box-shadow: var(--shadow-md);
+    min-width: 80px;
+    display: inline-block;
+    text-align: center;
 }
 
-@keyframes spin {
-    to { transform: rotate(360deg); }
+.status-badge.status-match {
+    background: var(--success-color);
+    color: var(--white);
+    border-color: var(--white);
+    box-shadow: 0 0 12px var(--success-color);
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
 }
 
-/* Responsive Design */
-@media (max-width: 1024px) {
-    .container {
-        padding: var(--spacing-lg);
-    }
-    
-    .form-grid {
-        grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-    }
-    
-    .scenario-grid {
-        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-    }
+.status-badge.status-mismatch {
+    background: var(--error-color);
+    color: var(--white);
+    border-color: var(--white);
+    box-shadow: 0 0 12px var(--error-color);
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
 }
 
-@media (max-width: 768px) {
-    .container {
-        padding: var(--spacing-md);
-    }
-    
-    .header-content {
-        flex-direction: column;
-        gap: var(--spacing-md);
-        text-align: center;
-    }
-    
-    .form-grid {
-        grid-template-columns: 1fr;
-    }
-    
-    .scenario-grid {
-        grid-template-columns: 1fr;
-    }
-    
-    .summary-cards {
-        grid-template-columns: repeat(2, 1fr);
-    }
-    
-    .results-header {
-        flex-direction: column;
-        gap: var(--spacing-lg);
-        align-items: stretch;
-    }
-    
-    .results-actions {
-        justify-content: center;
-        flex-wrap: wrap;
-    }
-    
-    .welcome-content h2 {
-        font-size: var(--font-size-2xl);
-    }
-    
-    .table-wrapper {
-        font-size: var(--font-size-xs);
-    }
-    
-    .comparison-table th,
-    .comparison-table td {
-        padding: var(--spacing-sm);
-    }
+.status-badge.status-missing {
+    background: var(--warning-color);
+    color: var(--white);
+    border-color: var(--white);
+    box-shadow: 0 0 12px var(--warning-color);
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
 }
 
-@media (max-width: 480px) {
-    .summary-cards {
-        grid-template-columns: 1fr;
-    }
-    
-    .form-card {
-        padding: var(--spacing-lg);
-    }
-    
-    .comparison-scenarios {
-        padding: var(--spacing-lg);
-    }
+/* Enhanced visibility for other status badges */
+.status-badge.found {
+    background: var(--success-color);
+    color: var(--white);
+    border-color: var(--white);
+    box-shadow: 0 0 8px var(--success-color);
 }
 
-/* Accessibility */
-@media (prefers-reduced-motion: reduce) {
-    *,
-    *::before,
-    *::after {
-        animation-duration: 0.01ms !important;
-        animation-iteration-count: 1 !important;
-        transition-duration: 0.01ms !important;
-    }
+.status-badge.not-found {
+    background: var(--error-color);
+    color: var(--white);
+    border-color: var(--white);
+    box-shadow: 0 0 8px var(--error-color);
 }
 
-/* Focus States */
-button:focus-visible,
-input:focus-visible,
-select:focus-visible {
-    outline: 2px solid var(--primary-blue);
-    outline-offset: 2px;
+.status-badge.error {
+    background: var(--warning-color);
+    color: var(--white);
+    border-color: var(--white);
+    box-shadow: 0 0 8px var(--warning-color);
 }
 
-/* Print Styles */
-@media print {
-    .header,
-    .form-section,
-    .results-actions {
-        display: none;
-    }
-    
-    .results-section {
-        display: block !important;
-    }
-    
-    .comparison-table {
-        font-size: 10px;
-    }
-}
-
-
-
-
-
-/* OSCAR Reconciliation Tool - Animations */
-
-/* Keyframe Animations */
-@keyframes fadeIn {
-    from {
-        opacity: 0;
-    }
-    to {
-        opacity: 1;
-    }
-}
-
+/* Animations */
 @keyframes fadeInUp {
     from {
         opacity: 0;
@@ -1173,50 +1122,6 @@ select:focus-visible {
     }
 }
 
-@keyframes fadeInDown {
-    from {
-        opacity: 0;
-        transform: translateY(-30px);
-    }
-    to {
-        opacity: 1;
-        transform: translateY(0);
-    }
-}
-
-@keyframes slideInFromLeft {
-    from {
-        opacity: 0;
-        transform: translateX(-50px);
-    }
-    to {
-        opacity: 1;
-        transform: translateX(0);
-    }
-}
-
-@keyframes slideInFromRight {
-    from {
-        opacity: 0;
-        transform: translateX(50px);
-    }
-    to {
-        opacity: 1;
-        transform: translateX(0);
-    }
-}
-
-@keyframes scaleIn {
-    from {
-        opacity: 0;
-        transform: scale(0.8);
-    }
-    to {
-        opacity: 1;
-        transform: scale(1);
-    }
-}
-
 @keyframes pulse {
     0%, 100% {
         opacity: 1;
@@ -1224,487 +1129,112 @@ select:focus-visible {
     }
     50% {
         opacity: 0.7;
-        transform: scale(1.05);
-    }
-}
-
-@keyframes bounce {
-    0%, 20%, 53%, 80%, 100% {
-        transform: translateY(0);
-    }
-    40%, 43% {
-        transform: translateY(-10px);
-    }
-    70% {
-        transform: translateY(-5px);
-    }
-    90% {
-        transform: translateY(-2px);
-    }
-}
-
-@keyframes spin {
-    from {
-        transform: rotate(0deg);
-    }
-    to {
-        transform: rotate(360deg);
-    }
-}
-
-@keyframes shimmer {
-    0% {
-        background-position: -200px 0;
-    }
-    100% {
-        background-position: calc(200px + 100%) 0;
-    }
-}
-
-@keyframes slideOutRight {
-    from {
-        transform: translateX(0);
-        opacity: 1;
-    }
-    to {
-        transform: translateX(100%);
-        opacity: 0;
-    }
-}
-
-@keyframes slideInRight {
-    from {
-        transform: translateX(100%);
-        opacity: 0;
-    }
-    to {
-        transform: translateX(0);
-        opacity: 1;
-    }
-}
-
-@keyframes glow {
-    0%, 100% {
-        box-shadow: 0 0 5px rgba(74, 144, 226, 0.3);
-    }
-    50% {
-        box-shadow: 0 0 20px rgba(74, 144, 226, 0.6);
-    }
-}
-
-@keyframes typewriter {
-    from {
-        width: 0;
-    }
-    to {
-        width: 100%;
-    }
-}
-
-@keyframes blinkCursor {
-    from, to {
-        border-color: transparent;
-    }
-    50% {
-        border-color: var(--primary-blue);
-    }
-}
-
-/* Page Load Animations */
-.welcome-section {
-    animation: fadeInDown 0.8s ease-out;
-}
-
-.form-card {
-    animation: fadeInUp 0.8s ease-out 0.2s both;
-}
-
-.results-section.show {
-    animation: fadeInUp 0.6s ease-out;
-}
-
-/* Component Animations */
-.summary-card {
-    animation: scaleIn 0.5s ease-out;
-}
-
-.summary-card:nth-child(1) { animation-delay: 0.1s; }
-.summary-card:nth-child(2) { animation-delay: 0.2s; }
-.summary-card:nth-child(3) { animation-delay: 0.3s; }
-.summary-card:nth-child(4) { animation-delay: 0.4s; }
-
-.table-container {
-    animation: fadeInUp 0.6s ease-out;
-}
-
-.table-container:nth-child(1) { animation-delay: 0.1s; }
-.table-container:nth-child(2) { animation-delay: 0.2s; }
-
-/* Interactive Animations */
-.execute-btn {
-    position: relative;
-    overflow: hidden;
-}
-
-.execute-btn::before {
-    content: '';
-    position: absolute;
-    top: 0;
-    left: -100%;
-    width: 100%;
-    height: 100%;
-    background: linear-gradient(90deg, transparent, rgba(255,255,255,0.2), transparent);
-    transition: left 0.5s;
-}
-
-.execute-btn:hover::before {
-    left: 100%;
-}
-
-.btn-secondary {
-    position: relative;
-    overflow: hidden;
-}
-
-.btn-secondary::after {
-    content: '';
-    position: absolute;
-    top: 50%;
-    left: 50%;
-    width: 0;
-    height: 0;
-    border-radius: 50%;
-    background: rgba(74, 144, 226, 0.3);
-    transform: translate(-50%, -50%);
-    transition: width 0.6s, height 0.6s;
-}
-
-.btn-secondary:active::after {
-    width: 300px;
-    height: 300px;
-}
-
-/* Status Badge Animations */
-.status-badge {
-    position: relative;
-    overflow: hidden;
-}
-
-.status-badge.match {
-    animation: pulse 2s infinite;
-}
-
-.status-badge.mismatch {
-    animation: bounce 1s ease-in-out;
-}
-
-.status-badge.missing {
-    animation: pulse 1.5s infinite;
-}
-
-/* Form Input Animations */
-.form-group input:focus,
-.form-group select:focus {
-    animation: glow 2s ease-in-out infinite;
-}
-
-.input-info {
-    opacity: 0;
-    transform: translateY(-10px);
-    transition: all 0.3s ease;
-}
-
-.form-group:hover .input-info,
-.form-group input:focus + .input-info,
-.form-group select:focus + .input-info {
-    opacity: 1;
-    transform: translateY(0);
-}
-
-/* Connection Status Animation */
-.status-dot {
-    animation: pulse 2s infinite;
-}
-
-.status-dot.connected {
-    animation: pulse 2s infinite;
-}
-
-.status-dot.disconnected {
-    animation: bounce 1s infinite;
-}
-
-/* Table Row Animations */
-.comparison-table tbody tr {
-    opacity: 0;
-    transform: translateX(-20px);
-    animation: slideInFromLeft 0.5s ease-out forwards;
-}
-
-.comparison-table tbody tr:nth-child(1) { animation-delay: 0.1s; }
-.comparison-table tbody tr:nth-child(2) { animation-delay: 0.2s; }
-.comparison-table tbody tr:nth-child(3) { animation-delay: 0.3s; }
-.comparison-table tbody tr:nth-child(4) { animation-delay: 0.4s; }
-.comparison-table tbody tr:nth-child(5) { animation-delay: 0.5s; }
-
-/* Action Icon Animations */
-.action-icon {
-    transition: all 0.3s cubic-bezier(0.68, -0.55, 0.265, 1.55);
-}
-
-.action-icon:hover {
-    animation: bounce 0.6s ease;
-}
-
-/* Card Hover Effects */
-.summary-card {
-    transition: all 0.3s ease;
-}
-
-.summary-card:hover {
-    animation: none;
-    transform: translateY(-8px) scale(1.02);
-}
-
-/* Loading Animations */
-.loading-spinner {
-    animation: spin 1s linear infinite;
-}
-
-.loading-dots::after {
-    content: '...';
-    animation: typewriter 1.5s steps(3) infinite;
-}
-
-/* Shimmer Effect for Loading States */
-.shimmer {
-    background: linear-gradient(90deg, #f0f0f0 25%, #e0e0e0 50%, #f0f0f0 75%);
-    background-size: 200px 100%;
-    animation: shimmer 1.5s infinite;
-}
-
-/* Scenario Info Animation */
-.scenario-info {
-    animation: slideInFromLeft 0.6s ease-out;
-}
-
-.scenario-info .action-btn {
-    opacity: 0;
-    transform: translateY(20px);
-    animation: fadeInUp 0.4s ease-out forwards;
-}
-
-.scenario-info .action-btn:nth-child(1) { animation-delay: 0.1s; }
-.scenario-info .action-btn:nth-child(2) { animation-delay: 0.2s; }
-.scenario-info .action-btn:nth-child(3) { animation-delay: 0.3s; }
-
-/* Toast Notification Animations */
-.toast {
-    animation: slideInRight 0.3s ease-out;
-}
-
-.toast.removing {
-    animation: slideOutRight 0.3s ease-out;
-}
-
-/* Progress Bar Animation */
-.progress-bar {
-    width: 0%;
-    height: 4px;
-    background: var(--primary-blue);
-    border-radius: 2px;
-    transition: width 0.3s ease;
-}
-
-.progress-bar.loading {
-    animation: shimmer 1.5s infinite;
-}
-
-/* Number Counter Animation */
-.card-number {
-    opacity: 0;
-    animation: fadeIn 0.8s ease-out 0.5s forwards;
-}
-
-.card-number.counting {
-    animation: bounce 0.6s ease-in-out;
-}
-
-/* Stagger Animation for Grid Items */
-.form-group {
-    opacity: 0;
-    transform: translateY(20px);
-    animation: fadeInUp 0.5s ease-out forwards;
-}
-
-.form-group:nth-child(1) { animation-delay: 0.1s; }
-.form-group:nth-child(2) { animation-delay: 0.2s; }
-.form-group:nth-child(3) { animation-delay: 0.3s; }
-.form-group:nth-child(4) { animation-delay: 0.4s; }
-.form-group:nth-child(5) { animation-delay: 0.5s; }
-.form-group:nth-child(6) { animation-delay: 0.6s; }
-
-/* Header Animation */
-.header {
-    animation: slideInFromLeft 0.8s ease-out;
-}
-
-.logo {
-    animation: fadeInDown 0.8s ease-out 0.2s both;
-}
-
-.connection-status {
-    animation: fadeInDown 0.8s ease-out 0.4s both;
-}
-
-/* Elastic Scale Animation */
-@keyframes elasticScale {
-    0% {
-        transform: scale(1);
-    }
-    20% {
         transform: scale(1.1);
     }
-    40% {
-        transform: scale(0.95);
+}
+
+/* Responsive Design */
+@media (max-width: 768px) {
+    .container {
+        padding: 0 var(--spacing-md);
     }
-    60% {
-        transform: scale(1.05);
+
+    .header-content {
+        flex-direction: column;
+        gap: var(--spacing-md);
     }
-    80% {
-        transform: scale(0.98);
+
+    .form-grid {
+        grid-template-columns: 1fr;
     }
-    100% {
-        transform: scale(1);
+
+    .scenario-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .summary-cards {
+        grid-template-columns: repeat(2, 1fr);
+    }
+
+    .results-header {
+        flex-direction: column;
+        gap: var(--spacing-md);
+        align-items: stretch;
+    }
+
+    .results-actions {
+        justify-content: center;
+        flex-wrap: wrap;
+    }
+
+    .comparison-table {
+        font-size: var(--font-size-xs);
+    }
+
+    .comparison-table th,
+    .comparison-table td {
+        padding: var(--spacing-sm);
     }
 }
 
-.execute-btn:active {
-    animation: elasticScale 0.4s ease-out;
-}
+@media (max-width: 480px) {
+    .welcome-content h2 {
+        font-size: var(--font-size-2xl);
+    }
 
-/* Floating Animation */
-@keyframes float {
-    0%, 100% {
-        transform: translateY(0px);
+    .search-card {
+        padding: var(--spacing-lg);
     }
-    50% {
-        transform: translateY(-10px);
-    }
-}
 
-.floating {
-    animation: float 3s ease-in-out infinite;
-}
-
-/* Attention Seeking Animations */
-@keyframes shake {
-    0%, 100% {
-        transform: translateX(0);
-    }
-    10%, 30%, 50%, 70%, 90% {
-        transform: translateX(-5px);
-    }
-    20%, 40%, 60%, 80% {
-        transform: translateX(5px);
+    .summary-cards {
+        grid-template-columns: 1fr;
     }
 }
 
-.shake {
-    animation: shake 0.6s ease-in-out;
+/* Utilities */
+.hidden {
+    display: none !important;
 }
 
-/* Success Animation */
-@keyframes successPulse {
-    0% {
-        transform: scale(1);
-        box-shadow: 0 0 0 0 rgba(39, 174, 96, 0.7);
-    }
-    70% {
-        transform: scale(1.05);
-        box-shadow: 0 0 0 10px rgba(39, 174, 96, 0);
-    }
-    100% {
-        transform: scale(1);
-        box-shadow: 0 0 0 0 rgba(39, 174, 96, 0);
-    }
+.text-center {
+    text-align: center;
 }
 
-.success-animation {
-    animation: successPulse 0.8s ease-out;
+.text-success {
+    color: var(--success-color);
 }
 
-/* Error Animation */
-@keyframes errorShake {
-    0%, 100% {
-        transform: translateX(0);
-    }
-    25% {
-        transform: translateX(-5px);
-    }
-    75% {
-        transform: translateX(5px);
-    }
+.text-error {
+    color: var(--error-color);
 }
 
-.error-animation {
-    animation: errorShake 0.5s ease-out;
+.text-warning {
+    color: var(--warning-color);
 }
 
-/* Reduced Motion Support */
-@media (prefers-reduced-motion: reduce) {
-    *,
-    *::before,
-    *::after {
-        animation-duration: 0.01ms !important;
-        animation-iteration-count: 1 !important;
-        transition-duration: 0.01ms !important;
-        scroll-behavior: auto !important;
-    }
-    
-    .status-dot {
-        animation: none;
-    }
-    
-    .floating {
-        animation: none;
-    }
-    
-    .pulse {
-        animation: none;
-    }
+/* Enhanced Focus States */
+*:focus {
+    outline: 2px solid var(--accent-color);
+    outline-offset: 2px;
 }
 
-/* High Contrast Mode Support */
-@media (prefers-contrast: high) {
-    .shimmer {
-        background: linear-gradient(90deg, #000 25%, #333 50%, #000 75%);
-    }
+/* Scrollbar Styling */
+::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
 }
 
-/* Animation Utility Classes */
-.animate-fade-in { animation: fadeIn 0.5s ease-out; }
-.animate-fade-in-up { animation: fadeInUp 0.6s ease-out; }
-.animate-fade-in-down { animation: fadeInDown 0.6s ease-out; }
-.animate-slide-in-left { animation: slideInFromLeft 0.5s ease-out; }
-.animate-slide-in-right { animation: slideInFromRight 0.5s ease-out; }
-.animate-scale-in { animation: scaleIn 0.4s ease-out; }
-.animate-bounce { animation: bounce 1s ease-in-out; }
-.animate-pulse { animation: pulse 2s infinite; }
-.animate-spin { animation: spin 1s linear infinite; }
-.animate-float { animation: float 3s ease-in-out infinite; }
-.animate-glow { animation: glow 2s ease-in-out infinite; }
+::-webkit-scrollbar-track {
+    background: var(--bg-darker);
+    border-radius: var(--radius-sm);
+}
 
-/* Animation Delays */
-.delay-100 { animation-delay: 0.1s; }
-.delay-200 { animation-delay: 0.2s; }
-.delay-300 { animation-delay: 0.3s; }
-.delay-400 { animation-delay: 0.4s; }
-.delay-500 { animation-delay: 0.5s; }
+::-webkit-scrollbar-thumb {
+    background: var(--primary-color);
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--accent-color);
+}
 
-/* Animation Durations */
-.duration-fast { animation-duration: 0.3s; }
-.duration-normal { animation-duration: 0.5s; }
-.duration-slow { animation-duration: 0.8s; }
-</body>
-</html>
+::-webkit-scrollbar-thumb:hover {
+    background: var(--primary-light);
+}
