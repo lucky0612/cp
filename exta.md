@@ -867,3 +867,411 @@
         // Field mappings for each database - ONLY show fields from actual queries
         const FIELD_MAPPINGS = {
             edb:
+            {
+                oscar: ['guid', 'gfid', 'gus_id', 'namespace', 'status'],
+                copper: ['guid', 'gfid', 'gus_id', 'eff_to', 'status'],
+                edb: ['guid', 'gfid', 'gus_id', 'eff_to', 'status']
+            },
+            star: {
+                oscar: ['guid', 'gfid', 'gus_id', 'namespace', 'status'],
+                copper: ['guid', 'gfid', 'gus_id', 'eff_to', 'exch_id', 'status'],
+                star: ['gfid', 'gfid_description', 'exchange_id']
+            }
+        };
+
+        const FIELD_LABELS = {
+            'guid': 'GUID',
+            'gfid': 'GFID',
+            'gus_id': 'GUS ID',
+            'status': 'Status',
+            'eff_to': 'Expiry Date',
+            'namespace': 'Namespace',
+            'exch_id': 'Exchange ID',
+            'exchange_id': 'Exchange ID',
+            'gfid_description': 'GFID Description'
+        };
+
+        document.addEventListener('DOMContentLoaded', function() {
+            const form = document.getElementById('reconcile-form');
+            const resultsSection = document.getElementById('results-section');
+            const submitBtn = document.getElementById('submit-btn');
+            
+            form.addEventListener('submit', async function(e) {
+                e.preventDefault();
+                
+                const guid = document.getElementById('guid').value.trim();
+                const gfid = document.getElementById('gfid').value.trim();
+                const gus_id = document.getElementById('gus-id').value.trim();
+                
+                if (!guid && (!gfid || !gus_id)) {
+                    showError('Please provide either GUID or both GFID and GUS ID');
+                    return;
+                }
+                
+                if (guid && (gfid || gus_id)) {
+                    showError('Please provide either GUID or GFID+GUS ID, not both');
+                    return;
+                }
+                
+                submitBtn.disabled = true;
+                submitBtn.innerHTML = '<div class="loading"></div><span>Processing...</span>';
+                
+                try {
+                    const response = await fetch('/api/reconcile', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        },
+                        body: JSON.stringify({ guid, gfid, gus_id })
+                    });
+                    
+                    const data = await response.json();
+                    
+                    if (!response.ok) {
+                        throw new Error(data.error || 'Reconciliation failed');
+                    }
+                    
+                    currentResults = data;
+                    displayResults(data);
+                    resultsSection.classList.add('show');
+                    resultsSection.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                    
+                } catch (error) {
+                    showError(error.message);
+                } finally {
+                    submitBtn.disabled = false;
+                    submitBtn.innerHTML = '<i class="fas fa-bolt"></i><span>Execute Reconciliation</span>';
+                }
+            });
+            
+            document.getElementById('clear-results-btn').addEventListener('click', function() {
+                resultsSection.classList.remove('show');
+                form.reset();
+                currentResults = null;
+                clearError();
+            });
+            
+            document.getElementById('export-btn').addEventListener('click', function() {
+                if (currentResults) {
+                    downloadJSON(currentResults, `oscar_reconciliation_${new Date().toISOString().split('T')[0]}.json`);
+                }
+            });
+        });
+        
+        function displayResults(data) {
+            clearError();
+            
+            // Display scenario with enhanced styling
+            const scenarioElement = document.getElementById('scenario-text');
+            const actionElement = document.getElementById('action-text');
+            
+            scenarioElement.innerHTML = `<strong>📋 Scenario:</strong> ${data.scenario}`;
+            actionElement.innerHTML = `<strong>⚡ Recommended Action:</strong><br>${data.recommended_action}`;
+            
+            // Display tables with only relevant fields
+            displayEDBTable(data.oscar_copper_edb);
+            displaySTARTable(data.oscar_copper_star);
+        }
+        
+        function displayEDBTable(data) {
+            const tbody = document.getElementById('edb-table-body');
+            tbody.innerHTML = '';
+            
+            const fieldMap = FIELD_MAPPINGS.edb;
+            
+            // Get all unique fields from the three databases
+            const allFields = new Set([
+                ...fieldMap.oscar,
+                ...fieldMap.copper,
+                ...fieldMap.edb
+            ]);
+            
+            allFields.forEach(field => {
+                const row = document.createElement('tr');
+                
+                // Only show field if it exists in that database's mapping
+                const oscarVal = fieldMap.oscar.includes(field) ? (data.oscar[field] || '-') : '-';
+                const copperVal = fieldMap.copper.includes(field) ? (data.copper[field] || '-') : '-';
+                const edbVal = fieldMap.edb.includes(field) ? (data.edb[field] || '-') : '-';
+                
+                const status = getFieldStatus(oscarVal, copperVal, edbVal, field);
+                
+                row.innerHTML = `
+                    <td class="db-column">${FIELD_LABELS[field] || field.toUpperCase()}</td>
+                    <td class="oscar-col">${formatValue(oscarVal, field)}</td>
+                    <td class="copper-col">${formatValue(copperVal, field)}</td>
+                    <td class="edb-col">${formatValue(edbVal, field)}</td>
+                    <td>${status}</td>
+                `;
+                
+                tbody.appendChild(row);
+            });
+            
+            // Add overall comparison row
+            const summaryRow = document.createElement('tr');
+            summaryRow.style.borderTop = '3px solid var(--accent-color)';
+            summaryRow.style.fontWeight = '700';
+            summaryRow.innerHTML = `
+                <td class="db-column" style="background: var(--gray-100);">OVERALL COMPARISON</td>
+                <td class="oscar-col" style="background: rgba(26, 54, 93, 0.15);">${formatValue(data.comparison.oscar_status, 'status')}</td>
+                <td class="copper-col" style="background: rgba(0, 180, 216, 0.15);">${formatValue(data.comparison.copper_status, 'status')}</td>
+                <td class="edb-col" style="background: rgba(237, 137, 54, 0.15);">${formatValue(data.comparison.edb_status, 'status')}</td>
+                <td>${getOverallStatus(data.comparison.oscar_copper_match, data.comparison.copper_edb_match)}</td>
+            `;
+            tbody.appendChild(summaryRow);
+        }
+        
+        function displaySTARTable(data) {
+            const tbody = document.getElementById('star-table-body');
+            tbody.innerHTML = '';
+            
+            const fieldMap = FIELD_MAPPINGS.star;
+            
+            // Get all unique fields from the three databases
+            const allFields = new Set([
+                ...fieldMap.oscar,
+                ...fieldMap.copper,
+                ...fieldMap.star
+            ]);
+            
+            allFields.forEach(field => {
+                const row = document.createElement('tr');
+                
+                // Only show field if it exists in that database's mapping
+                const oscarVal = fieldMap.oscar.includes(field) ? (data.oscar[field] || '-') : '-';
+                const copperVal = fieldMap.copper.includes(field) ? (data.copper[field] || '-') : '-';
+                const starVal = fieldMap.star.includes(field) ? (data.star[field] || '-') : '-';
+                
+                const status = getFieldStatus(oscarVal, copperVal, starVal, field);
+                
+                row.innerHTML = `
+                    <td class="db-column">${FIELD_LABELS[field] || field.toUpperCase()}</td>
+                    <td class="oscar-col">${formatValue(oscarVal, field)}</td>
+                    <td class="copper-col">${formatValue(copperVal, field)}</td>
+                    <td class="star-col">${formatValue(starVal, field)}</td>
+                    <td>${status}</td>
+                `;
+                
+                tbody.appendChild(row);
+            });
+            
+            // Add overall comparison row
+            const summaryRow = document.createElement('tr');
+            summaryRow.style.borderTop = '3px solid var(--accent-color)';
+            summaryRow.style.fontWeight = '700';
+            summaryRow.innerHTML = `
+                <td class="db-column" style="background: var(--gray-100);">OVERALL COMPARISON</td>
+                <td class="oscar-col" style="background: rgba(26, 54, 93, 0.15);">${formatValue(data.comparison.oscar_status, 'status')}</td>
+                <td class="copper-col" style="background: rgba(0, 180, 216, 0.15);">${formatValue(data.comparison.copper_status, 'status')}</td>
+                <td class="star-col" style="background: rgba(56, 161, 105, 0.15);">${data.comparison.star_exists ? '<span class="status-badge status-active">EXISTS</span>' : '<span class="status-badge status-missing">NOT FOUND</span>'}</td>
+                <td>${getOverallStatus(data.comparison.oscar_copper_match, data.comparison.copper_gfid_in_star ? 'MATCH' : 'MISSING')}</td>
+            `;
+            tbody.appendChild(summaryRow);
+        }
+        
+        function formatValue(value, field) {
+            if (value === null || value === undefined || value === '' || value === '-') {
+                return '<span style="color: var(--gray-400); font-style: italic;">N/A</span>';
+            }
+            
+            if (field === 'status') {
+                const valueLower = String(value).toLowerCase();
+                let statusClass = '';
+                
+                if (valueLower.includes('active')) {
+                    statusClass = 'status-active';
+                } else if (valueLower.includes('inactive') || valueLower.includes('expired')) {
+                    statusClass = 'status-inactive';
+                } else if (valueLower.includes('missing')) {
+                    statusClass = 'status-missing';
+                }
+                
+                return `<span class="status-badge ${statusClass}">${value}</span>`;
+            }
+            
+            // Format dates
+            if (field === 'eff_to' && value !== '-') {
+                try {
+                    const date = new Date(value);
+                    if (!isNaN(date.getTime())) {
+                        return `<span style="font-family: monospace; font-weight: 600;">${date.toISOString().split('T')[0]}</span>`;
+                    }
+                } catch (e) {
+                    // Return as-is if date parsing fails
+                }
+            }
+            
+            // Highlight important fields
+            if (field === 'guid' || field === 'gfid' || field === 'gus_id') {
+                return `<span style="font-weight: 700; color: var(--primary-color);">${value}</span>`;
+            }
+            
+            return value;
+        }
+        
+        function getFieldStatus(val1, val2, val3, field) {
+            // Collect actual values (not N/A or -)
+            const values = [];
+            const rawValues = [val1, val2, val3];
+            
+            rawValues.forEach(v => {
+                if (v !== '-' && v !== null && v !== undefined && v !== '') {
+                    values.push(String(v).trim().toUpperCase());
+                }
+            });
+            
+            // If all are missing/N/A
+            if (values.length === 0) {
+                return '<span class="status-badge status-missing">ALL N/A</span>';
+            }
+            
+            // If only some have values
+            if (values.length < rawValues.filter(v => v !== '-').length) {
+                return '<span class="status-badge status-partial">PARTIAL</span>';
+            }
+            
+            // Check if all present values match
+            const uniqueValues = [...new Set(values)];
+            
+            if (uniqueValues.length === 1) {
+                return '<span class="status-badge status-match">✓ MATCH</span>';
+            } else {
+                return '<span class="status-badge status-mismatch">✗ MISMATCH</span>';
+            }
+        }
+        
+        function getOverallStatus(match1, match2) {
+            const isMatch1 = match1 === 'MATCH';
+            const isMatch2 = match2 === 'MATCH' || match2 === true;
+            const isMissing1 = match1 && match1.includes('MISSING');
+            const isMissing2 = match2 === 'MISSING' || match2 === false;
+            
+            if (isMatch1 && isMatch2) {
+                return '<span class="status-badge status-match" style="font-size: 0.875rem; padding: 0.5rem 1rem;">✓ FULL MATCH</span>';
+            } else if (isMissing1 || isMissing2) {
+                return '<span class="status-badge status-missing" style="font-size: 0.875rem; padding: 0.5rem 1rem;">⚠ DATA MISSING</span>';
+            } else {
+                return '<span class="status-badge status-mismatch" style="font-size: 0.875rem; padding: 0.5rem 1rem;">✗ MISMATCH</span>';
+            }
+        }
+        
+        function showError(message) {
+            const errorContainer = document.getElementById('error-container');
+            errorContainer.innerHTML = `
+                <div class="alert alert-error" style="animation: fadeInUp 0.3s ease-out;">
+                    <i class="fas fa-exclamation-triangle" style="margin-right: 0.5rem; font-size: 1.25rem;"></i>
+                    <strong>Error:</strong> ${message}
+                </div>
+            `;
+        }
+        
+        function clearError() {
+            const errorContainer = document.getElementById('error-container');
+            errorContainer.innerHTML = '';
+        }
+        
+        function downloadJSON(data, filename) {
+            const blob = new Blob([JSON.stringify(data, null, 2)], {
+                type: 'application/json'
+            });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+            
+            showToast('✓ Results exported successfully!', 'success');
+        }
+        
+        function showToast(message, type = 'info') {
+            const toast = document.createElement('div');
+            
+            const colors = {
+                success: 'var(--success-color)',
+                error: 'var(--error-color)',
+                warning: 'var(--warning-color)',
+                info: 'var(--accent-color)'
+            };
+            
+            const icons = {
+                success: 'fa-check-circle',
+                error: 'fa-exclamation-circle',
+                warning: 'fa-exclamation-triangle',
+                info: 'fa-info-circle'
+            };
+            
+            toast.style.cssText = `
+                position: fixed;
+                top: 100px;
+                right: 30px;
+                background: linear-gradient(135deg, ${colors[type]}, ${colors[type]}dd);
+                color: white;
+                padding: 1.25rem 1.75rem;
+                border-radius: 1rem;
+                box-shadow: 0 15px 35px rgba(0,0,0,0.3);
+                z-index: 10000;
+                animation: slideInRight 0.4s cubic-bezier(0.68, -0.55, 0.265, 1.55);
+                font-weight: 600;
+                display: flex;
+                align-items: center;
+                gap: 0.75rem;
+                border: 2px solid rgba(255,255,255,0.3);
+                min-width: 300px;
+            `;
+            
+            toast.innerHTML = `
+                <i class="fas ${icons[type]}" style="font-size: 1.5rem;"></i>
+                <span>${message}</span>
+            `;
+            
+            document.body.appendChild(toast);
+            
+            setTimeout(() => {
+                toast.style.animation = 'slideOutRight 0.4s cubic-bezier(0.68, -0.55, 0.265, 1.55)';
+                setTimeout(() => {
+                    document.body.removeChild(toast);
+                }, 400);
+            }, 3000);
+        }
+        
+        // Add animation styles
+        const style = document.createElement('style');
+        style.textContent = `
+            @keyframes slideInRight {
+                from {
+                    transform: translateX(400px);
+                    opacity: 0;
+                }
+                to {
+                    transform: translateX(0);
+                    opacity: 1;
+                }
+            }
+            @keyframes slideOutRight {
+                from {
+                    transform: translateX(0);
+                    opacity: 1;
+                }
+                to {
+                    transform: translateX(400px);
+                    opacity: 0;
+                }
+            }
+            @keyframes fadeInUp {
+                from {
+                    opacity: 0;
+                    transform: translateY(20px);
+                }
+                to {
+                    opacity: 1;
+                    transform: translateY(0);
+                }
+            }
+        `;
+        document.head.appendChild(style);
+    </script>
+</body>
+</html>
