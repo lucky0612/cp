@@ -255,7 +255,14 @@
             font-weight: 500;
         }
 
-        .form-group input:focus {
+        .form-group input:disabled {
+            background: var(--gray-100);
+            color: var(--gray-400);
+            cursor: not-allowed;
+            opacity: 0.6;
+        }
+
+        .form-group input:focus:not(:disabled) {
             outline: none;
             border-color: var(--accent-color);
             box-shadow: 0 0 0 4px rgba(0, 180, 216, 0.15);
@@ -858,23 +865,22 @@
                     </div>
                 </div>
             </section>
-        </div>
+         </div>
     </main>
 
     <script>
         let currentResults = null;
 
-        // Field mappings for each database - ONLY show fields from actual queries
+        // Field mappings - ONLY fields that exist in each database
         const FIELD_MAPPINGS = {
-            edb:
-            {
+            edb: {
                 oscar: ['guid', 'gfid', 'gus_id', 'namespace', 'status'],
                 copper: ['guid', 'gfid', 'gus_id', 'eff_to', 'status'],
                 edb: ['guid', 'gfid', 'gus_id', 'eff_to', 'status']
             },
             star: {
                 oscar: ['guid', 'gfid', 'gus_id', 'namespace', 'status'],
-                copper: ['guid', 'gfid', 'gus_id', 'eff_to', 'exch_id', 'status'],
+                copper: ['gfid', 'gus_id', 'eff_to', 'exch_id', 'status'],
                 star: ['gfid', 'gfid_description', 'exchange_id']
             }
         };
@@ -896,20 +902,61 @@
             const resultsSection = document.getElementById('results-section');
             const submitBtn = document.getElementById('submit-btn');
             
+            const guidInput = document.getElementById('guid');
+            const gfidInput = document.getElementById('gfid');
+            const gusIdInput = document.getElementById('gus-id');
+
+            // Input locking logic
+            guidInput.addEventListener('input', function() {
+                if (this.value.trim().length > 0) {
+                    gfidInput.disabled = true;
+                    gusIdInput.disabled = true;
+                    gfidInput.value = '';
+                    gusIdInput.value = '';
+                } else {
+                    gfidInput.disabled = false;
+                    gusIdInput.disabled = false;
+                }
+            });
+
+            gfidInput.addEventListener('input', function() {
+                if (this.value.trim().length > 0) {
+                    guidInput.disabled = true;
+                    guidInput.value = '';
+                } else if (gusIdInput.value.trim().length === 0) {
+                    guidInput.disabled = false;
+                }
+            });
+
+            gusIdInput.addEventListener('input', function() {
+                if (this.value.trim().length > 0) {
+                    guidInput.disabled = true;
+                    guidInput.value = '';
+                } else if (gfidInput.value.trim().length === 0) {
+                    guidInput.disabled = false;
+                }
+            });
+            
             form.addEventListener('submit', async function(e) {
                 e.preventDefault();
                 
-                const guid = document.getElementById('guid').value.trim();
-                const gfid = document.getElementById('gfid').value.trim();
-                const gus_id = document.getElementById('gus-id').value.trim();
+                const guid = guidInput.value.trim();
+                const gfid = gfidInput.value.trim();
+                const gus_id = gusIdInput.value.trim();
                 
+                // Validation
                 if (!guid && (!gfid || !gus_id)) {
                     showError('Please provide either GUID or both GFID and GUS ID');
                     return;
                 }
-                
+
                 if (guid && (gfid || gus_id)) {
                     showError('Please provide either GUID or GFID+GUS ID, not both');
+                    return;
+                }
+
+                if ((gfid && !gus_id) || (!gfid && gus_id)) {
+                    showError('Both GFID and GUS ID are required when not using GUID');
                     return;
                 }
                 
@@ -947,6 +994,9 @@
             document.getElementById('clear-results-btn').addEventListener('click', function() {
                 resultsSection.classList.remove('show');
                 form.reset();
+                guidInput.disabled = false;
+                gfidInput.disabled = false;
+                gusIdInput.disabled = false;
                 currentResults = null;
                 clearError();
             });
@@ -979,28 +1029,39 @@
             
             const fieldMap = FIELD_MAPPINGS.edb;
             
-            // Get all unique fields from the three databases
-            const allFields = new Set([
+            // Get union of all fields across the three databases
+            const allFields = [...new Set([
                 ...fieldMap.oscar,
                 ...fieldMap.copper,
                 ...fieldMap.edb
-            ]);
+            ])];
             
+            // Only display fields that appear in at least one database
             allFields.forEach(field => {
                 const row = document.createElement('tr');
                 
-                // Only show field if it exists in that database's mapping
-                const oscarVal = fieldMap.oscar.includes(field) ? (data.oscar[field] || '-') : '-';
-                const copperVal = fieldMap.copper.includes(field) ? (data.copper[field] || '-') : '-';
-                const edbVal = fieldMap.edb.includes(field) ? (data.edb[field] || '-') : '-';
+                // Check if field exists in each database's mapping
+                const oscarHasField = fieldMap.oscar.includes(field);
+                const copperHasField = fieldMap.copper.includes(field);
+                const edbHasField = fieldMap.edb.includes(field);
                 
-                const status = getFieldStatus(oscarVal, copperVal, edbVal, field);
+                // Get values only if field exists for that database
+                const oscarVal = oscarHasField ? (data.oscar[field] || null) : null;
+                const copperVal = copperHasField ? (data.copper[field] || null) : null;
+                const edbVal = edbHasField ? (data.edb[field] || null) : null;
+                
+                // Skip row if all values are null (field doesn't exist anywhere)
+                if (oscarVal === null && copperVal === null && edbVal === null) {
+                    return;
+                }
+                
+                const status = getFieldStatus(oscarVal, copperVal, edbVal, oscarHasField, copperHasField, edbHasField);
                 
                 row.innerHTML = `
                     <td class="db-column">${FIELD_LABELS[field] || field.toUpperCase()}</td>
-                    <td class="oscar-col">${formatValue(oscarVal, field)}</td>
-                    <td class="copper-col">${formatValue(copperVal, field)}</td>
-                    <td class="edb-col">${formatValue(edbVal, field)}</td>
+                    <td class="oscar-col">${oscarHasField ? formatValue(oscarVal, field) : '<span style="color: var(--gray-400); font-style: italic;">N/A</span>'}</td>
+                    <td class="copper-col">${copperHasField ? formatValue(copperVal, field) : '<span style="color: var(--gray-400); font-style: italic;">N/A</span>'}</td>
+                    <td class="edb-col">${edbHasField ? formatValue(edbVal, field) : '<span style="color: var(--gray-400); font-style: italic;">N/A</span>'}</td>
                     <td>${status}</td>
                 `;
                 
@@ -1012,7 +1073,7 @@
             summaryRow.style.borderTop = '3px solid var(--accent-color)';
             summaryRow.style.fontWeight = '700';
             summaryRow.innerHTML = `
-                <td class="db-column" style="background: var(--gray-100);">OVERALL COMPARISON</td>
+                <td class="db-column" style="background: var(--gray-100);">OVERALL STATUS</td>
                 <td class="oscar-col" style="background: rgba(26, 54, 93, 0.15);">${formatValue(data.comparison.oscar_status, 'status')}</td>
                 <td class="copper-col" style="background: rgba(0, 180, 216, 0.15);">${formatValue(data.comparison.copper_status, 'status')}</td>
                 <td class="edb-col" style="background: rgba(237, 137, 54, 0.15);">${formatValue(data.comparison.edb_status, 'status')}</td>
@@ -1027,28 +1088,39 @@
             
             const fieldMap = FIELD_MAPPINGS.star;
             
-            // Get all unique fields from the three databases
-            const allFields = new Set([
+            // Get union of all fields across the three databases
+            const allFields = [...new Set([
                 ...fieldMap.oscar,
                 ...fieldMap.copper,
                 ...fieldMap.star
-            ]);
+            ])];
             
+            // Only display fields that appear in at least one database
             allFields.forEach(field => {
                 const row = document.createElement('tr');
                 
-                // Only show field if it exists in that database's mapping
-                const oscarVal = fieldMap.oscar.includes(field) ? (data.oscar[field] || '-') : '-';
-                const copperVal = fieldMap.copper.includes(field) ? (data.copper[field] || '-') : '-';
-                const starVal = fieldMap.star.includes(field) ? (data.star[field] || '-') : '-';
+                // Check if field exists in each database's mapping
+                const oscarHasField = fieldMap.oscar.includes(field);
+                const copperHasField = fieldMap.copper.includes(field);
+                const starHasField = fieldMap.star.includes(field);
                 
-                const status = getFieldStatus(oscarVal, copperVal, starVal, field);
+                // Get values only if field exists for that database
+                const oscarVal = oscarHasField ? (data.oscar[field] || null) : null;
+                const copperVal = copperHasField ? (data.copper[field] || null) : null;
+                const starVal = starHasField ? (data.star[field] || null) : null;
+                
+                // Skip row if all values are null (field doesn't exist anywhere)
+                if (oscarVal === null && copperVal === null && starVal === null) {
+                    return;
+                }
+                
+                const status = getFieldStatus(oscarVal, copperVal, starVal, oscarHasField, copperHasField, starHasField);
                 
                 row.innerHTML = `
                     <td class="db-column">${FIELD_LABELS[field] || field.toUpperCase()}</td>
-                    <td class="oscar-col">${formatValue(oscarVal, field)}</td>
-                    <td class="copper-col">${formatValue(copperVal, field)}</td>
-                    <td class="star-col">${formatValue(starVal, field)}</td>
+                    <td class="oscar-col">${oscarHasField ? formatValue(oscarVal, field) : '<span style="color: var(--gray-400); font-style: italic;">N/A</span>'}</td>
+                    <td class="copper-col">${copperHasField ? formatValue(copperVal, field) : '<span style="color: var(--gray-400); font-style: italic;">N/A</span>'}</td>
+                    <td class="star-col">${starHasField ? formatValue(starVal, field) : '<span style="color: var(--gray-400); font-style: italic;">N/A</span>'}</td>
                     <td>${status}</td>
                 `;
                 
@@ -1060,7 +1132,7 @@
             summaryRow.style.borderTop = '3px solid var(--accent-color)';
             summaryRow.style.fontWeight = '700';
             summaryRow.innerHTML = `
-                <td class="db-column" style="background: var(--gray-100);">OVERALL COMPARISON</td>
+                <td class="db-column" style="background: var(--gray-100);">OVERALL STATUS</td>
                 <td class="oscar-col" style="background: rgba(26, 54, 93, 0.15);">${formatValue(data.comparison.oscar_status, 'status')}</td>
                 <td class="copper-col" style="background: rgba(0, 180, 216, 0.15);">${formatValue(data.comparison.copper_status, 'status')}</td>
                 <td class="star-col" style="background: rgba(56, 161, 105, 0.15);">${data.comparison.star_exists ? '<span class="status-badge status-active">EXISTS</span>' : '<span class="status-badge status-missing">NOT FOUND</span>'}</td>
@@ -1070,8 +1142,8 @@
         }
         
         function formatValue(value, field) {
-            if (value === null || value === undefined || value === '' || value === '-') {
-                return '<span style="color: var(--gray-400); font-style: italic;">N/A</span>';
+            if (value === null || value === undefined || value === '') {
+                return '<span style="color: var(--gray-400); font-style: italic;">—</span>';
             }
             
             if (field === 'status') {
@@ -1090,7 +1162,7 @@
             }
             
             // Format dates
-            if (field === 'eff_to' && value !== '-') {
+            if (field === 'eff_to' && value) {
                 try {
                     const date = new Date(value);
                     if (!isNaN(date.getTime())) {
@@ -1109,24 +1181,35 @@
             return value;
         }
         
-        function getFieldStatus(val1, val2, val3, field) {
-            // Collect actual values (not N/A or -)
+        function getFieldStatus(val1, val2, val3, has1, has2, has3) {
+            // Collect actual values only from databases that have this field
             const values = [];
-            const rawValues = [val1, val2, val3];
             
-            rawValues.forEach(v => {
-                if (v !== '-' && v !== null && v !== undefined && v !== '') {
-                    values.push(String(v).trim().toUpperCase());
-                }
-            });
-            
-            // If all are missing/N/A
-            if (values.length === 0) {
-                return '<span class="status-badge status-missing">ALL N/A</span>';
+            if (has1 && val1 !== null && val1 !== undefined && val1 !== '') {
+                values.push(String(val1).trim().toUpperCase());
+            }
+            if (has2 && val2 !== null && val2 !== undefined && val2 !== '') {
+                values.push(String(val2).trim().toUpperCase());
+            }
+            if (has3 && val3 !== null && val3 !== undefined && val3 !== '') {
+                values.push(String(val3).trim().toUpperCase());
             }
             
-            // If only some have values
-            if (values.length < rawValues.filter(v => v !== '-').length) {
+            // Count how many databases should have this field
+            const expectedCount = (has1 ? 1 : 0) + (has2 ? 1 : 0) + (has3 ? 1 : 0);
+            
+            // If field doesn't exist in any database
+            if (expectedCount === 0) {
+                return '<span class="status-badge status-missing">N/A</span>';
+            }
+            
+            // If no values found where they should exist
+            if (values.length === 0) {
+                return '<span class="status-badge status-missing">MISSING</span>';
+            }
+            
+            // If we have fewer values than expected databases
+            if (values.length < expectedCount) {
                 return '<span class="status-badge status-partial">PARTIAL</span>';
             }
             
